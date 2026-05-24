@@ -1,0 +1,13 @@
+services:
+  market-data-service:
+    build: ./market-data-service
+    ports:
+      - "8001:8001"
+  pricing-service:
+    build: ./pricing-service
+    ports:
+      - "8002:8002"
+  monitoring-service:
+    build: ./monitoring-service
+    ports:
+      - "8003:8003"
