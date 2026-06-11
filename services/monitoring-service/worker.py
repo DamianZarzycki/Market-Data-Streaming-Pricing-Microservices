@@ -1,11 +1,9 @@
 import time
-import threading
 import logging
 from datetime import datetime, timezone
 from urllib import request
 from models import ServiceStatus
 
-status_lock = threading.Lock()
 health_cache = {}
 
 previous_states = {
@@ -71,7 +69,6 @@ def monitoring_worker():
 
             previous_states[service_name] = current_status
 
-        with status_lock:
-            health_cache = current_states
+        health_cache = current_states
 
         time.sleep(1)

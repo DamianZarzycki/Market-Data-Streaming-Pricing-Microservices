@@ -42,7 +42,24 @@ We used SSE (Server-Sent Events). It is a one-way connection from the server to 
 ## 7. Testing the System
 You can test the system using `curl` commands or by opening the links in a web browser.
 
-## 8. Implementation Challenges
+## 9. Implementation Challenges
 * The biggest architectural challenge was handling concurrency, especially using locks (`threading.Lock`):
 
 * Putting an unnecessary lock on network tasks (like asking other services via HTTP) slowed down the whole system or blocked it completely.
+
+## 10. Migrations
+
+### DB init
+* docker run --rm -d --name postgres -e POSTGRES_USER=user -e POSTGRES_PASSWORD=password -e POSTGRES_DB=market_data_db -p 5432:5432 postgres:15
+
+### To run first migration. Thanks to volume of ./db folder we are able to make Alembic to create files for us there
+* Creates the initial configuration files on your drive (the migrations folder, env.py, and alembic.ini files). It does not touch the database. You run this only once at the start.
+
+### docker compose run --rm db-migrations alembic init migrations
+* alembic.ini is generated and migarions folder with env.py file.
+
+### docker compose run --rm db-migrations alembic revision --autogenerate -m "message"
+* Compares your code (models.py) with the database and generates a new update script file (in the versions folder). The database itself remains unchanged at this point.
+
+### docker compose run --rm db-migrations alembic upgrade head   
+* Reads the generated scripts from the versions folder and physically executes them in the database. This is the command that actually creates or modifies the tables
