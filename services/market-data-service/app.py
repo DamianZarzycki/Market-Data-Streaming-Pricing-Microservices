@@ -17,6 +17,11 @@ def health():
     return worker.health_stats
 
 
+@app.route("/symbols")
+def symbols():
+    return worker.symbols()
+
+
 @app.route("/snapshot")
 def snapshot():
     with worker.data_lock:
@@ -32,9 +37,7 @@ def stream():
     with worker.data_lock:
         worker.subscribers.append(client_queue)
 
-    logging.info(
-        f"Client connected to stream. Active subscribers: {len(worker.subscribers)}"
-    )
+    logging.info(f"Client connected to stream. Active subscribers: {len(worker.subscribers)}")
 
     def event_generator():
         try:

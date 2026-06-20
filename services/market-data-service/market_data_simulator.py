@@ -1,5 +1,6 @@
 import random
 
+
 class MarketDataSimulator:
     def __init__(self):
 
@@ -39,9 +40,15 @@ class MarketDataSimulator:
         return round(self.__eurusd_spot, 4)
 
     def generate_usd_curve_tick(self):
-        self.__usd_curve_rates = [max(0.001, r + random.normalvariate(0, self.__curve_volatility)) for r in self.__usd_curve_rates]
+        self.__usd_curve_rates = [
+            max(0.001, r + random.normalvariate(0, self.__curve_volatility))
+            for r in self.__usd_curve_rates
+        ]
         return [round(r, 4) for r in self.__usd_curve_rates]
 
     def generate_eur_curve_tick(self):
-        self.__eur_curve_rates = [max(0.001, r + random.normalvariate(0, self.__curve_volatility)) for r in self.__eur_curve_rates]
+        self.__eur_curve_rates = [
+            max(0.001, r + random.normalvariate(0, self.__curve_volatility))
+            for r in self.__eur_curve_rates
+        ]
         return [round(r, 4) for r in self.__eur_curve_rates]

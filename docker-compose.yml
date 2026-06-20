@@ -37,28 +37,45 @@ services:
     build: ./services/pricing-service
     ports:
       - "8002:8002"
-  monitoring-service:
-    build: ./services/monitoring-service
-    ports:
-      - "8003:8003"
-  # books-service:
-  #   build: ./services/books-service
+    volumes:
+      - ./shared:/app/shared
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+  # monitoring-service:
+  #   build: ./services/monitoring-service
   #   ports:
-  #     - "8004:8004"
-  #   volumes:
-  #     - ./shared:/app/shared
-  #   environment:
-  #     - DATABASE_URL=${DATABASE_URL}
+  #     - "8003:8003"
+  books-service:
+    build: ./services/books-service
+    ports:
+      - "8004:8004"
+    volumes:
+      - ./shared:/app/shared
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
   # blotter-service:
   #   build: ./services/blotter-service
   #   ports:
   #     - "8006:8006"
-  # trade-generation-service:
-  #   build: ./services/trade-generation-service
-  #   ports:
-  #     - "8007:8007"
-  # trade-action-service:
-  #   build: ./services/trade-action-service
-  #   ports:
-  #     - "8080:8080"
+  #   volumes:
+  #     - ./shared:/app/shared
+  #   environment:
+  #     - DATABASE_URL=${DATABASE_URL}
+  trade-generation-service:
+    build: ./services/trade-generation-service
+    ports:
+      - "8007:8007"
+    volumes:
+      - ./shared:/app/shared
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - TRADE_GENERATION_INTERVAL_MS=${TRADE_GENERATION_INTERVAL_MS}
+  trade-action-service:
+    build: ./services/trade-action-service
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./shared:/app/shared
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
     

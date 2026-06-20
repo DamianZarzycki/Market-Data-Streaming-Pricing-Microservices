@@ -5,6 +5,7 @@ from bottle import Bottle, HTTPResponse
 from custom_server import ThreadedServer
 
 import worker
+import calculation_service
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 app = Bottle()
@@ -25,20 +26,20 @@ def health():
 
 @app.route("/valuations")
 def valuations():
-    with worker.pricing_lock:
-        return worker.valuations_store.copy()
+    with calculation_service.pricing_lock:
+        return calculation_service.valuations_store.copy()
 
 
-@app.route("/valuations/<instrument_id>")
-def valuations_by_instrument_id(instrument_id):
-    with worker.pricing_lock:
-        valuation = worker.valuations_store.get(instrument_id)
+@app.route("/valuations/<trade_id>")
+def valuations_by_trade_id(trade_id):
+    with calculation_service.pricing_lock:
+        valuation = calculation_service.valuations_store.get(trade_id)
 
     if valuation is not None:
-        return {"instrument_id": instrument_id, **valuation}
+        return {"trade_id": trade_id, **valuation}
     else:
         error_body = json.dumps(
-            {"error": "Valuation not found for instrument_id: " + instrument_id}
+            {"error": "Valuation not found for trade_id: " + trade_id}
         )
         return HTTPResponse(
             status=404, body=error_body, headers={"Content-Type": "application/json"}
@@ -49,14 +50,16 @@ def valuations_by_instrument_id(instrument_id):
 def valuation_stream():
     def event_generator():
         while True:
-            message = worker.metrics_queue.get()
-            if message["type"] == "PRICING_DONE":
+            valuation_data = calculation_service.sse_queue.get()
+            try:
                 logging.info(
-                    f"Processing valuation stream event: {message['type']} at {message['timestamp']}"
+                    f"Streaming valuation update for trade {valuation_data.get('trade_id')}"
                 )
-                # czemy yield lepszy niz return?
-                yield f"data: {worker.valuations_store.get(message['instrument'])}\n\n"
-            worker.metrics_queue.task_done()
+                yield f"event: valuation_update\ndata: {json.dumps(valuation_data)}\n\n"
+            except Exception as e:
+                logging.error(f"Error serializing valuation for SSE: {e}")
+            finally:
+                calculation_service.sse_queue.task_done()
 
     return event_generator()
 
@@ -71,5 +74,9 @@ if __name__ == "__main__":
     metrics_thread = threading.Thread(target=worker.metrics_worker)
     metrics_thread.daemon = True
     metrics_thread.start()
+
+    cache_thread = threading.Thread(target=worker.cache_refresh_worker)
+    cache_thread.daemon = True
+    cache_thread.start()
 
     app.run(host="0.0.0.0", port=8002, server=ThreadedServer)

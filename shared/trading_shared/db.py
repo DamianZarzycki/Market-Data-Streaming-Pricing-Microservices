@@ -1,10 +1,10 @@
 import os
+from shared.trading_shared.repositories import TradeRepository, ValuationRepository
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Connecting to the database
 engine = create_engine(DATABASE_URL)
 
 SessionLocal = sessionmaker(
@@ -13,10 +13,24 @@ SessionLocal = sessionmaker(
     autoflush=False, 
     bind=engine)
 
-def get_db():
-    db = SessionLocal()
-    try:
-        # pauza
-        yield db
-    finally:
-        db.close()
+
+class DBSessionManager:
+    def __init__(self):
+        self.session_factory = SessionLocal
+
+    def __enter__(self):
+        self.session = self.session_factory()
+        self.trades = TradeRepository(self.session)
+        self.valuations = ValuationRepository(self.session)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is not None:
+            self.rollback()
+        self.session.close()
+
+    def commit(self):
+        self.session.commit()
+
+    def rollback(self):
+        self.session.rollback()

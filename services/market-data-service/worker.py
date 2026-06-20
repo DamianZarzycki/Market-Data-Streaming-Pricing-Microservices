@@ -32,6 +32,7 @@ health_stats = {
 batch_size = 30
 market_simulator = MarketDataSimulator()
 
+
 def metric_worker():
     global health_stats
 
@@ -42,9 +43,7 @@ def metric_worker():
         try:
             message = metrics_queue.get()
             if message["type"] == "EVENT_GENERATED":
-                logging.info(
-                    f"Processing metric: {message['type']} at {message['timestamp']}"
-                )
+                logging.info(f"Processing metric: {message['type']} at {message['timestamp']}")
                 local_events_count += 1
                 local_last_time = message["timestamp"]
 
@@ -73,7 +72,7 @@ def random_yield():
 
 def generate_market_tick():
     global global_event_id
-    
+
     current_tmsp = current_timestamp()
     global_event_id += 5
 
@@ -129,7 +128,7 @@ def generate_market_tick():
             "tenors": ["1M", "3M", "1Y", "5Y"],
             "rates": eur_rates,
             "timestamp": current_tmsp,
-        }
+        },
     }
 
     metrics_queue.put({"type": "EVENT_GENERATED", "timestamp": current_tmsp})
@@ -159,7 +158,6 @@ def publish_tick_to_stream(market_tick_data):
 
 
 def market_worker():
-
     interval_ms_str = os.getenv("TICK_INTERVAL_MS", "100")
     interval_ms = int(interval_ms_str)
     sleep_seconds = interval_ms / 1000.0
@@ -170,6 +168,27 @@ def market_worker():
         publish_tick_to_stream(new_ticks)
         db_queue.put(new_ticks)
         time.sleep(sleep_seconds)
+
+
+def symbols():
+    db = SessionLocal()
+    logging.info("Kisiel")
+    try:
+        data = db.query(MarketDataSpotPrice).all()
+        grouped_symbols = {}
+        logging.info(f"Fetchedddd {len(data)} market data records from DB for symbol extraction")
+        for item in data:
+            if item.asset_class:
+                if item.asset_class not in grouped_symbols:
+                    grouped_symbols[item.asset_class] = []
+
+                if item.symbol not in grouped_symbols[item.asset_class]:
+                    grouped_symbols[item.asset_class].append(item.symbol)
+        logging.info(f"Grouped symbols by asset class: {grouped_symbols}")
+        return grouped_symbols
+    finally:
+        db.close()
+
 
 def db_worker():
     buffer = []
@@ -183,15 +202,15 @@ def db_worker():
                     if "curve_type" in data:
                         logging.info(f"Processing market data for DB: {data}")
                         curve_record = MarketDataCurve(
-                        event_id=data.get("event_id"),
-                        curve_name=data.get("curve_name"),       # np. "USD_YIELD_CURVE"
-                        curve_type=data.get("curve_type"),       # np. "YIELD_CURVE"
-                        currency=data.get("currency"),           # np. "USD"
-                        tenors=data.get("tenors"),               # np. ["1M", "3M", "1Y", "5Y"]
-                        rates=data.get("rates"),                 # np. [0.0412, 0.0415, 0.0421, 0.0450]
-                        event_time=datetime.now(timezone.utc),   # czas wystąpienia ticku
-                        raw_payload=data                         # cały wygenerowany słownik dla pewności audytowej
-                    )
+                            event_id=data.get("event_id"),
+                            curve_name=data.get("curve_name"),  # np. "USD_YIELD_CURVE"
+                            curve_type=data.get("curve_type"),  # np. "YIELD_CURVE"
+                            currency=data.get("currency"),  # np. "USD"
+                            tenors=data.get("tenors"),  # np. ["1M", "3M", "1Y", "5Y"]
+                            rates=data.get("rates"),  # np. [0.0412, 0.0415, 0.0421, 0.0450]
+                            event_time=datetime.now(timezone.utc),  # czas wystąpienia ticku
+                            raw_payload=data,  # cały wygenerowany słownik dla pewności audytowej
+                        )
                         buffer.append(curve_record)
                     else:
                         record = MarketDataSpotPrice(
@@ -200,7 +219,7 @@ def db_worker():
                             asset_class=data["asset_type"],
                             source="GENERATED",
                             event_time=datetime.now(timezone.utc),
-                            raw_payload=data
+                            raw_payload=data,
                         )
 
                         if data["asset_type"] == AssetClass.EQUITY.value:
@@ -211,11 +230,10 @@ def db_worker():
                             record.spot = data.get("spot")
                         elif data["asset_type"] == AssetClass.BOND.value:
                             record.last = data.get("yield")
-                        
+
                         buffer.append(record)
 
                 if len(buffer) >= batch_size or db_queue.empty() and len(buffer) > 0:
-                    
                     try:
                         db.add_all(buffer)
                         db.commit()
@@ -226,8 +244,8 @@ def db_worker():
                         logging.error(f"Error occurred while saving market data: {e}")
                     finally:
                         db.close()
-                        db_queue.task_done()    
-                    
+                        db_queue.task_done()
+
             except Exception as e:
                 db.rollback()
                 logging.error(f"Error occurred while saving market data: {e}")

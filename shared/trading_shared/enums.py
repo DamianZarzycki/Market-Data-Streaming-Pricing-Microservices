@@ -9,6 +9,10 @@ class TradeStatus(str, Enum):
     CLOSED = "CLOSED"
     CANCELLED = "CANCELLED"
 
+class ActionType(str, Enum):
+    OPEN_TRADE = "OPEN_TRADE"
+    CLOSE_TRADE = "CLOSE_TRADE"
+
 class TradeSource(str, Enum):
     GENERATED = "GENERATED"
     MANUAL = "MANUAL"

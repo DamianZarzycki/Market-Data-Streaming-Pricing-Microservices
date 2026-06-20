@@ -63,3 +63,5 @@ You can test the system using `curl` commands or by opening the links in a web b
 
 ### docker compose run --rm db-migrations alembic upgrade head   
 * Reads the generated scripts from the versions folder and physically executes them in the database. This is the command that actually creates or modifies the tables
+
+docker compose exec postgres psql -U user -d market_data_db
