@@ -8,11 +8,11 @@ import logging
 import urllib.request
 import json
 
-# threading event moze? (wait)
+# TODO threading event moze? (wait)
 generator_state = {"is_running": False, "total_generated": 0, "thread": None}
 
 # jak constrainy moze wplynac na transakcje DB -> duze tabele i sprawdzanie id w trakcie insertow
-# profiling 
+# profiling
 
 def fetch_json(url, method="GET", headers=None, data=None):
     if headers is None:
@@ -54,7 +54,7 @@ def generate_open_or_close_trade():
 
 def generate_and_send_to_trade_action_service_batch(count=10):
     batch_payload = []
-    
+
     for _ in range(count):
         intention = generate_random_intention()
         if intention:
@@ -97,7 +97,7 @@ def generate_random_intention():
 
             if action == ActionType.CLOSE_TRADE.value:
                 logging.info("Checking for active trades to close...")
-                active_trades = db.trades.get_trades(status=TradeStatus.ACTIVE.value, symbol=None, side=None, first_only=True)
+                active_trades = db.trades.get_trades(None, status=TradeStatus.ACTIVE.value, symbol=None, first_only=True)
 
                 if not active_trades:
                     logging.info(
@@ -131,7 +131,7 @@ def generate_random_intention():
                 logging.info(
                     "ASKING BOOKS-SERVICE for available books and market-data-service for symbols..."
                 )
-                
+
                 response = fetch_json("http://books-service:8004/books")
                 symbols_response = fetch_json("http://market-data-service:8001/symbols")
 

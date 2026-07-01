@@ -22,7 +22,7 @@ def health():
 @app.route("/trade-actions", method=["POST"])
 def trade_actions():
     logging.info("New /trade-actions request received")
-    
+
     try:
         request_data = request.json
     except Exception as e:
@@ -69,14 +69,14 @@ def trade_actions():
 @app.route('/trade-actions/batch', method=["POST"])
 def trade_action_batch():
     logging.info("New /trade-actions/batch request received")
-    
+
     try:
         request_data = request.json
     except Exception as e:
         logging.error(f"Failed to parse JSON payload: {e}")
         response.status = 400
         return {"error": "Invalid JSON format"}
-    
+
     if not request_data or not isinstance(request_data, list):
         logging.warning("Rejected request: Payload must be a non-empty list.")
         response.status = 400
@@ -94,7 +94,7 @@ def trade_action_batch():
         if not action_type or action_type not in [ActionType.OPEN_TRADE.value, ActionType.CLOSE_TRADE.value]:
             errors.append(f"Item {index}: Missing or invalid action_type")
             continue
-            
+
         if not client_request_id:
             errors.append(f"Item {index}: Missing client_request_id")
             continue

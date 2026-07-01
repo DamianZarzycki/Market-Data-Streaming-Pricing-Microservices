@@ -4,6 +4,7 @@ from shared.trading_shared.models import (
     MarketDataCurve,
     MarketDataSpotPrice,
     Trade,
+    Valuation,
 )
 
 
@@ -21,9 +22,17 @@ class TradeRepository:
             .all()
         )
 
-    def get_trades(self, status=None, symbol=None, side=None, first_only=False):
-
+    def get_trades(self, client_request_id=None, book_id=None, asset_class=None, status=None, symbol=None, first_only=False, page=1, limit=50):
         query = self.db_session.query(Trade)
+
+        if client_request_id:
+            query = query.filter(Trade.client_request_id == client_request_id)
+
+        if book_id:
+            query = query.filter(Trade.book_id == book_id)
+
+        if asset_class:
+            query = query.filter(Trade.asset_class == asset_class)
 
         if status:
             query = query.filter(Trade.status == status)
@@ -31,12 +40,9 @@ class TradeRepository:
         if symbol:
             query = query.filter(Trade.symbol == symbol)
 
-        if side:
-            query = query.filter(Trade.side == side)
-
         if first_only:
             return query.first()
-        return query.all()
+        return query.offset((page - 1) * limit).limit(limit).all()
 
     def add(self, trade):
         self.db_session.add(trade)
@@ -48,6 +54,13 @@ class ValuationRepository:
 
     def add(self, valuation):
         self.db_session.add(valuation)
+
+    def get_valuations_by_trade_id(self, trade_id):
+        return (
+            self.db_session.query(Valuation)
+            .filter(Valuation.trade_id == trade_id)
+            .all()
+        )
 
 
 class InstrumentRepository:
@@ -65,7 +78,7 @@ class InstrumentRepository:
         self.db_session.add(instrument)
 
 
-class MarketDataSpotPriceRepository:
+class MarketDataRepository:
     def __init__(self, db_session):
         self.db_session = db_session
 
@@ -79,11 +92,6 @@ class MarketDataSpotPriceRepository:
             .first()
         )
 
-
-class MarketDataCurveRepository:
-    def __init__(self, db_session):
-        self.db_session = db_session
-
     def get_curve(self, asset_class, symbol):
         return (
             self.db_session.query(MarketDataCurve)
@@ -93,3 +101,7 @@ class MarketDataCurveRepository:
             )
             .first()
         )
+
+    def add_all(self, market_data_list):
+        self.db_session.add_all(market_data_list)
+

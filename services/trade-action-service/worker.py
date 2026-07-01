@@ -3,7 +3,7 @@ import queue
 import uuid
 import logging
 from shared.trading_shared.db import DBSessionManager
-from shared.trading_shared.enums import ActionType
+from shared.trading_shared.enums import ActionType, EntityType, EventType, Severity
 from shared.trading_shared.models import Instrument, Trade, Valuation
 
 trade_queue = queue.Queue()
@@ -31,7 +31,7 @@ def trade_action_handler(data):
             if action_type == ActionType.OPEN_TRADE.value:
                 # IDEMPOTENCY check
                 if client_request_id:
-                    existing = db.trades.get_trades(client_request_id, None, None, True)
+                    existing = db.trades.get_trades(client_request_id=client_request_id, first_only=True)
                     if existing:
                         logging.warning(
                             f"Duplicate OPEN_TRADE ignored: client_request_id {client_request_id} "
@@ -42,14 +42,15 @@ def trade_action_handler(data):
                 book_id = data.get("book_id")
                 asset_class = data.get("asset_class")
                 symbol = data.get("symbol")
-
-                instrument = db.query(Instrument).filter_by(symbol=symbol).first()
+                logging.info(f"SYMBOL: {symbol}.")
+                instrument = db.instruments.get_by_symbol(symbol)
+                logging.info(f"INSTRUMENT: {instrument}.")
                 if not instrument:
                     logging.info(f"Instrument not found: {symbol}. Creating new instrument.")
                     instrument = Instrument(
                         symbol=symbol, asset_class=asset_class, multiplier=1
                     )
-                    db.add(instrument)
+                    db.instruments.add(instrument)
                     db.flush()
 
                 new_trade = Trade(
@@ -66,7 +67,8 @@ def trade_action_handler(data):
                     status="ACTIVE",
                     source="GENERATED",
                 )
-                db.add(new_trade)
+                logging.info(f"Creating new trade: {new_trade}")
+                db.trades.add(new_trade)
                 logging.info(
                     f"Successfully opened trade. (Client ID: {client_request_id})"
                 )
@@ -122,7 +124,7 @@ def trade_action_handler(data):
                 close_price = float(data.get("close_price"))
                 trade_price = float(trade_to_close.trade_price)
                 quantity = float(trade_to_close.quantity)
-                
+
                 if trade_to_close.side == "BUY":
                     realized_pnl = round((close_price - trade_price) * quantity, 4)
                 else:
@@ -148,8 +150,9 @@ def trade_action_handler(data):
                         "close_reason": data.get("close_reason"),
                     },
                 )
+                logging.info(f"Creating closing valuation: {closing_valuation}")
                 db.valuations.add(closing_valuation)
-
+                # TODO Cache clearing clear cache of trade for trade close
                 logging.info(f"Successfully closed trade: {trade_id_to_close}")
 
             db.commit()
@@ -157,5 +160,6 @@ def trade_action_handler(data):
         except Exception as e:
             db.rollback()
             logging.error(f"WENT WRONG: {e}")
+
         finally:
             db.close()

@@ -47,7 +47,6 @@ def check_service_health(url, service_name):
 
 def monitoring_worker():
     global health_cache
-    
     while True:
         market_data_status = check_service_health("http://market-data-service:8001/health", "market-data-service")
         pricing_status = check_service_health("http://pricing-service:8002/health", "pricing-service")

@@ -12,7 +12,7 @@ def reload_active_trades_cache():
     try:
         logging.info("Reloading active trades cache...")
         with DBSessionManager() as db:
-            trades = db.trades.get_trades(status=TradeStatus.ACTIVE.value)
+            trades = db.trades.get_trades(client_request_id=None, status=TradeStatus.ACTIVE.value, symbol=None, first_only=False)
 
         with cache_lock:
             new_cache = {trade.trade_id: trade for trade in trades}

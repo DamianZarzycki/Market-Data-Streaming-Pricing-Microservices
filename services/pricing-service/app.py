@@ -1,7 +1,7 @@
 import json
 import threading
 import logging
-from bottle import Bottle, HTTPResponse
+from bottle import Bottle, HTTPResponse, response
 from custom_server import ThreadedServer
 
 import worker
@@ -48,6 +48,8 @@ def valuations_by_trade_id(trade_id):
 
 @app.route("/valuation-stream")
 def valuation_stream():
+    logging.info("Client connected to /valuation-stream for SSE.")
+    response.content_type = "text/event-stream"
     def event_generator():
         while True:
             valuation_data = calculation_service.sse_queue.get()

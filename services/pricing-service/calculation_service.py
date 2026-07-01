@@ -3,7 +3,6 @@ import logging
 import queue
 import threading
 import uuid
-import persistence
 from shared.trading_shared.db import DBSessionManager
 from shared.trading_shared.models import Valuation
 
@@ -165,6 +164,7 @@ def _price_trade(tick, trade, asset_type):
         "instrument": trade_id,
         "value": fair_value,
     })
+    logging.info(f"Published valuation for trade {trade_id} to metrics queue.")
     sse_queue.put(valuation_data)
 
 

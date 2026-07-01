@@ -1,7 +1,9 @@
-from shared.trading_shared.db import SessionLocal
+from shared.trading_shared.db import DBSessionManager, SessionLocal
 from shared.trading_shared.enums import CurveType
 from shared.trading_shared.models import MarketDataCurve, MarketDataSpotPrice
 from shared.trading_shared.enums import AssetClass, ServiceStatus
+from shared.trading_shared.audit import AuditLogger
+from shared.trading_shared.enums import EventType, Severity, EntityType
 
 import json
 import logging
@@ -172,7 +174,6 @@ def market_worker():
 
 def symbols():
     db = SessionLocal()
-    logging.info("Kisiel")
     try:
         data = db.query(MarketDataSpotPrice).all()
         grouped_symbols = {}
@@ -193,64 +194,62 @@ def symbols():
 def db_worker():
     buffer = []
     logging.info("DB worker started")
-    db = SessionLocal()
-    while True:
-        try:
-            new_ticks = db_queue.get()
+    with DBSessionManager() as db:
+        while True:
             try:
-                for _, data in new_ticks.items():
-                    if "curve_type" in data:
-                        logging.info(f"Processing market data for DB: {data}")
-                        curve_record = MarketDataCurve(
-                            event_id=data.get("event_id"),
-                            curve_name=data.get("curve_name"),  # np. "USD_YIELD_CURVE"
-                            curve_type=data.get("curve_type"),  # np. "YIELD_CURVE"
-                            currency=data.get("currency"),  # np. "USD"
-                            tenors=data.get("tenors"),  # np. ["1M", "3M", "1Y", "5Y"]
-                            rates=data.get("rates"),  # np. [0.0412, 0.0415, 0.0421, 0.0450]
-                            event_time=datetime.now(timezone.utc),  # czas wystąpienia ticku
-                            raw_payload=data,  # cały wygenerowany słownik dla pewności audytowej
-                        )
-                        buffer.append(curve_record)
-                    else:
-                        record = MarketDataSpotPrice(
-                            event_id=data.get("event_id"),
-                            symbol=data["symbol"],
-                            asset_class=data["asset_type"],
-                            source="GENERATED",
-                            event_time=datetime.now(timezone.utc),
-                            raw_payload=data,
-                        )
+                new_ticks = db_queue.get()
+                try:
+                    for _, data in new_ticks.items():
+                        if "curve_type" in data:
+                            logging.info(f"Processing market data for DB: {data}")
+                            curve_record = MarketDataCurve(
+                                event_id=data.get("event_id"),
+                                curve_name=data.get("curve_name"),  # np. "USD_YIELD_CURVE"
+                                curve_type=data.get("curve_type"),  # np. "YIELD_CURVE"
+                                currency=data.get("currency"),  # np. "USD"
+                                tenors=data.get("tenors"),  # np. ["1M", "3M", "1Y", "5Y"]
+                                rates=data.get("rates"),  # np. [0.0412, 0.0415, 0.0421, 0.0450]
+                                event_time=datetime.now(timezone.utc),  # czas wystąpienia ticku
+                                raw_payload=data,  # cały wygenerowany słownik dla pewności audytowej
+                            )
+                            buffer.append(curve_record)
+                        else:
+                            record = MarketDataSpotPrice(
+                                event_id=data.get("event_id"),
+                                symbol=data["symbol"],
+                                asset_class=data["asset_type"],
+                                source="GENERATED",
+                                event_time=datetime.now(timezone.utc),
+                                raw_payload=data,
+                            )
 
-                        if data["asset_type"] == AssetClass.EQUITY.value:
-                            record.bid = data.get("bid")
-                            record.ask = data.get("ask")
-                            record.last = data.get("last")
-                        elif data["asset_type"] == AssetClass.FX.value:
-                            record.spot = data.get("spot")
-                        elif data["asset_type"] == AssetClass.BOND.value:
-                            record.last = data.get("yield")
+                            if data["asset_type"] == AssetClass.EQUITY.value:
+                                record.bid = data.get("bid")
+                                record.ask = data.get("ask")
+                                record.last = data.get("last")
+                            elif data["asset_type"] == AssetClass.FX.value:
+                                record.spot = data.get("spot")
+                            elif data["asset_type"] == AssetClass.BOND.value:
+                                record.last = data.get("yield")
 
-                        buffer.append(record)
+                            buffer.append(record)
 
-                if len(buffer) >= batch_size or db_queue.empty() and len(buffer) > 0:
-                    try:
-                        db.add_all(buffer)
-                        db.commit()
-                        logging.info(f"Saved {len(buffer)} market data records to DB")
-                        buffer.clear()
-                    except Exception as e:
-                        db.rollback()
-                        logging.error(f"Error occurred while saving market data: {e}")
-                    finally:
-                        db.close()
-                        db_queue.task_done()
+                    if len(buffer) >= batch_size or db_queue.empty() and len(buffer) > 0:
+                        try:
+                            db.market_data.add_all(buffer)
+                            db.commit()
+                            logging.info(f"Saved {len(buffer)} market data records to DB")
+                            buffer.clear()
+                        except Exception as e:
+                            db.rollback()
+                            logging.error(f"Error occurred while saving market data: {e}")
+                            db = SessionLocal()
 
+                except Exception as e:
+                    db.rollback()
+                    logging.error(f"Error occurred while saving market data: {e}")
+                    db = SessionLocal()
+                finally:
+                    db_queue.task_done()
             except Exception as e:
-                db.rollback()
-                logging.error(f"Error occurred while saving market data: {e}")
-            finally:
-                db.close()
-                db_queue.task_done()
-        except Exception as e:
-            logging.error(f"Error in DB worker: {e}")
+                logging.error(f"Error in DB worker: {e}")

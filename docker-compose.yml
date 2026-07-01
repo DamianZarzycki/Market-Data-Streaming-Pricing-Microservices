@@ -53,14 +53,14 @@ services:
       - ./shared:/app/shared
     environment:
       - DATABASE_URL=${DATABASE_URL}
-  # blotter-service:
-  #   build: ./services/blotter-service
-  #   ports:
-  #     - "8006:8006"
-  #   volumes:
-  #     - ./shared:/app/shared
-  #   environment:
-  #     - DATABASE_URL=${DATABASE_URL}
+  blotter-service:
+    build: ./services/blotter-service
+    ports:
+      - "8006:8006"
+    volumes:
+      - ./shared:/app/shared
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
   trade-generation-service:
     build: ./services/trade-generation-service
     ports:
