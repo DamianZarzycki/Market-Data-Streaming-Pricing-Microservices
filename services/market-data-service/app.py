@@ -5,6 +5,8 @@ import threading
 from bottle import Bottle, response
 from custom_server import ThreadedServer
 
+from shared.trading_shared.audit import AuditLogger
+from shared.trading_shared.enums import EventType
 import worker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
@@ -26,6 +28,14 @@ def symbols():
 def snapshot():
     with worker.data_lock:
         market_tick_data_state = dict(worker.market_tick_data_state)
+
+    audit_logger = AuditLogger("market-data-service")
+    audit_logger.info(
+        EventType.SNAPSHOT_GENERATED,
+        "Market Data service snapshot generated",
+        entity_type="Service",
+        correlation_id=None,
+    )
     return market_tick_data_state
 
 
@@ -63,16 +73,40 @@ if __name__ == "__main__":
     initial_ticks = worker.generate_market_tick()
     worker.update_snapshot(initial_ticks)
 
+    audit_logger = AuditLogger("market-data-service")
+    audit_logger.info(
+        EventType.WORKER_STARTED,
+        "Market Worker started",
+        entity_type="Service",
+        correlation_id=None,
+    )
     market_thread = threading.Thread(target=worker.market_worker)
     market_thread.daemon = True
     market_thread.start()
 
+    audit_logger.info(
+        EventType.WORKER_STARTED,
+        "Metric Worker started",
+        entity_type="Service",
+        correlation_id=None,
+    )
     metric_thread = threading.Thread(target=worker.metric_worker)
     metric_thread.daemon = True
     metric_thread.start()
 
+    audit_logger.info(
+        EventType.WORKER_STARTED,
+        "Database Worker started",
+        entity_type="Service",
+        correlation_id=None,
+    )
     db_thread = threading.Thread(target=worker.db_worker)
     db_thread.daemon = True
     db_thread.start()
 
-    app.run(host="0.0.0.0", port=8001, server=ThreadedServer)
+    try:
+        app.run(host="0.0.0.0", port=8001, server=ThreadedServer)
+    finally:
+        audit_logger.info(EventType.WORKER_STOPPED, "Market Worker stopped", entity_type="Service", correlation_id=None)
+        audit_logger.info(EventType.WORKER_STOPPED, "Metric Worker stopped", entity_type="Service", correlation_id=None)
+        audit_logger.info(EventType.WORKER_STOPPED, "Database Worker stopped", entity_type="Service", correlation_id=None)

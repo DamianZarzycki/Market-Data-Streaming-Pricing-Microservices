@@ -2,11 +2,13 @@ from datetime import datetime, timezone
 import queue
 import uuid
 import logging
+from shared.trading_shared.audit import AuditLogger
 from shared.trading_shared.db import DBSessionManager
 from shared.trading_shared.enums import ActionType, EntityType, EventType, Severity
 from shared.trading_shared.models import Instrument, Trade, Valuation
 
 trade_queue = queue.Queue()
+audit_logger = AuditLogger("trade-action-service")
 
 
 def trade_action_worker():
@@ -27,15 +29,29 @@ def trade_action_handler(data):
             logging.info(f"Received data from queue: {data}")
             action_type = data.get("action_type")
             client_request_id = data.get("client_request_id")
-
+            audit_logger.info(
+                EventType.CREATED,
+                f"Processing trade action: {action_type} for client_request_id: {client_request_id}",
+                entity_type=EntityType.TRADE.value,
+                correlation_id=client_request_id,
+                payload={"action_type": action_type, "client_request_id": client_request_id},
+            )
             if action_type == ActionType.OPEN_TRADE.value:
                 # IDEMPOTENCY check
                 if client_request_id:
-                    existing = db.trades.get_trades(client_request_id=client_request_id, first_only=True)
+                    existing = db.trades.get_trades(
+                        client_request_id=client_request_id, first_only=True
+                    )
                     if existing:
                         logging.warning(
                             f"Duplicate OPEN_TRADE ignored: client_request_id {client_request_id} "
                             f"already maps to trade {existing.trade_id}"
+                        )
+                        audit_logger.warning(
+                            EventType.REJECTED,
+                            f"Duplicate OPEN_TRADE ignored for client_request_id {client_request_id}",
+                            entity_type=EntityType.TRADE.value,
+                            correlation_id=client_request_id,
                         )
                         return
 
@@ -47,9 +63,7 @@ def trade_action_handler(data):
                 logging.info(f"INSTRUMENT: {instrument}.")
                 if not instrument:
                     logging.info(f"Instrument not found: {symbol}. Creating new instrument.")
-                    instrument = Instrument(
-                        symbol=symbol, asset_class=asset_class, multiplier=1
-                    )
+                    instrument = Instrument(symbol=symbol, asset_class=asset_class, multiplier=1)
                     db.instruments.add(instrument)
                     db.flush()
 
@@ -69,9 +83,7 @@ def trade_action_handler(data):
                 )
                 logging.info(f"Creating new trade: {new_trade}")
                 db.trades.add(new_trade)
-                logging.info(
-                    f"Successfully opened trade. (Client ID: {client_request_id})"
-                )
+                logging.info(f"Successfully opened trade. (Client ID: {client_request_id})")
 
             elif action_type == ActionType.CLOSE_TRADE.value:
                 trade_id_to_close = data.get("trade_id")
@@ -83,7 +95,8 @@ def trade_action_handler(data):
                         db.query(Trade)
                         .filter(
                             Trade.trade_id == trade_id_to_close,
-                            Trade.metadata_payload["close_client_request_id"].as_string() == client_request_id,
+                            Trade.metadata_payload["close_client_request_id"].as_string()
+                            == client_request_id,
                         )
                         .first()
                     )
@@ -92,8 +105,22 @@ def trade_action_handler(data):
                             f"Duplicate CLOSE_TRADE ignored: client_request_id {client_request_id} "
                             f"already closed trade {trade_id_to_close}"
                         )
+                        audit_logger.warning(
+                            EventType.REJECTED,
+                            f"Duplicate CLOSE_TRADE ignored for client_request_id {client_request_id}",
+                            entity_type=EntityType.TRADE.value,
+                            entity_id=str(trade_id_to_close),
+                            correlation_id=client_request_id,
+                        )
                         return
 
+                audit_logger.info(
+                        EventType.CLOSED,
+                        f"Closing trade: {trade_id_to_close}",
+                        entity_type=EntityType.TRADE.value,
+                        entity_id=str(trade_id_to_close),
+                        correlation_id=client_request_id,
+                )
                 trade_to_close = (
                     db.query(Trade)
                     .filter_by(trade_id=trade_id_to_close)
@@ -104,14 +131,24 @@ def trade_action_handler(data):
                 )
 
                 if not trade_to_close:
-                    logging.error(
-                        f"Trade not found in database with ID: {trade_id_to_close}"
+                    logging.error(f"Trade not found in database with ID: {trade_id_to_close}")
+                    audit_logger.warning(
+                        EventType.ERROR,
+                        f"CLOSE_TRADE failed: trade {trade_id_to_close} not found",
+                        entity_type=EntityType.TRADE.value,
+                        entity_id=str(trade_id_to_close),
+                        correlation_id=client_request_id,
                     )
                     return
 
                 if trade_to_close.status != "ACTIVE":
-                    logging.warning(
-                        f"Trade {trade_id_to_close} is already closed or inactive."
+                    logging.warning(f"Trade {trade_id_to_close} is already closed or inactive.")
+                    audit_logger.warning(
+                        EventType.REJECTED,
+                        f"CLOSE_TRADE rejected: trade {trade_id_to_close} is not ACTIVE",
+                        entity_type=EntityType.TRADE.value,
+                        entity_id=str(trade_id_to_close),
+                        correlation_id=client_request_id,
                     )
                     return
 
@@ -119,7 +156,6 @@ def trade_action_handler(data):
                 trade_to_close.close_price = data.get("close_price")
                 trade_to_close.close_reason = data.get("close_reason")
                 trade_to_close.closed_at = datetime.now(timezone.utc)
-
 
                 close_price = float(data.get("close_price"))
                 trade_price = float(trade_to_close.trade_price)
@@ -157,9 +193,34 @@ def trade_action_handler(data):
 
             db.commit()
 
+            if action_type == ActionType.OPEN_TRADE.value:
+                audit_logger.info(
+                    EventType.CREATED,
+                    f"Trade opened: {new_trade.trade_id}",
+                    entity_type=EntityType.TRADE.value,
+                    entity_id=str(new_trade.trade_id),
+                    correlation_id=client_request_id,
+                    payload={"book_id": book_id, "symbol": symbol, "asset_class": asset_class},
+                )
+            elif action_type == ActionType.CLOSE_TRADE.value:
+                audit_logger.info(
+                    EventType.CLOSED,
+                    f"Trade closed: {trade_id_to_close}",
+                    entity_type=EntityType.TRADE.value,
+                    entity_id=str(trade_id_to_close),
+                    correlation_id=client_request_id,
+                    payload={"close_price": data.get("close_price"), "realized_pnl": realized_pnl},
+                )
+
         except Exception as e:
             db.rollback()
             logging.error(f"WENT WRONG: {e}")
+            audit_logger.error(
+                EventType.DB_ERROR,
+                f"Trade action failed: {e}",
+                correlation_id=data.get("client_request_id"),
+                payload={"action_type": data.get("action_type"), "error": str(e)},
+            )
 
         finally:
             db.close()

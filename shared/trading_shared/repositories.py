@@ -1,11 +1,20 @@
 from shared.trading_shared.enums import TradeStatus
 from shared.trading_shared.models import (
+    AuditLog,
     Instrument,
     MarketDataCurve,
     MarketDataSpotPrice,
     Trade,
     Valuation,
 )
+
+
+class AuditRepository:
+    def __init__(self, db_session):
+        self.db_session = db_session
+
+    def add(self, audit_log: AuditLog):
+        self.db_session.add(audit_log)
 
 
 class TradeRepository:
@@ -42,7 +51,9 @@ class TradeRepository:
 
         if first_only:
             return query.first()
-        return query.offset((page - 1) * limit).limit(limit).all()
+        _page = int(page) if page is not None else 1
+        _limit = int(limit) if limit is not None else 50
+        return query.offset((_page - 1) * _limit).limit(_limit).all()
 
     def add(self, trade):
         self.db_session.add(trade)

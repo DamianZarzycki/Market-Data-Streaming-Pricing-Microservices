@@ -3,11 +3,13 @@ import logging
 import threading
 import time
 from urllib import request
-from models import ConnectionStatus
 import cache_service
 import calculation_service
+from shared.trading_shared.audit import AuditLogger
+from shared.trading_shared.enums import ConnectionStatus, EventType
 
 stats_lock = threading.Lock()
+audit_logger = AuditLogger("pricing-service")
 
 connection_status = ConnectionStatus.DISCONNECTED.value
 events_counter = 0
@@ -25,13 +27,19 @@ def connect_to_market_data_stream():
     logging.info("Attempting to connect to the stream...")
 
     url = "http://market-data-service:8001/stream"
-    response = request.urlopen(url)
+    try:
+        response = request.urlopen(url)
+    except Exception as e:
+        with stats_lock:
+            connection_status = ConnectionStatus.DISCONNECTED.value
+        audit_logger.error(EventType.STREAM_DISCONNECTED, f"Failed to connect to market-data-service: {e}")
+        raise
 
     with stats_lock:
         connection_status = ConnectionStatus.CONNECTED.value
 
     logging.info("Connected to the stream successfully.")
-
+    audit_logger.info(EventType.STREAM_CONNECTED, "Connected to market-data-service stream")
     return response
 
 
@@ -55,7 +63,7 @@ def update_market_state(tick):
 
 def pricing_worker():
     global connection_status
-
+    audit_logger.info(EventType.WORKER_STARTED, "Pricing worker started")
     while True:
         try:
             stream_response = connect_to_market_data_stream()
@@ -69,6 +77,7 @@ def pricing_worker():
                 connection_status = ConnectionStatus.DISCONNECTED.value
 
             logging.error(f"Connection lost: {e}")
+            audit_logger.error(EventType.STREAM_DISCONNECTED, f"Lost connection to market-data-service: {e}")
             time.sleep(1)
             logging.info("Attempting to reconnect...")
 

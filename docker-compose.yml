@@ -31,7 +31,7 @@ services:
     volumes:
       - ./shared:/app/shared
     environment:
-      - TICK_INTERVAL_MS=10000
+      - TICK_INTERVAL_MS=100
       - DATABASE_URL=${DATABASE_URL}
   pricing-service:
     build: ./services/pricing-service

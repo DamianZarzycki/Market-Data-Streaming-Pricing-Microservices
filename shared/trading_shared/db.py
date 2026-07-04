@@ -1,5 +1,5 @@
 import os
-from shared.trading_shared.repositories import InstrumentRepository, MarketDataRepository, TradeRepository, ValuationRepository
+from shared.trading_shared.repositories import AuditRepository, InstrumentRepository, MarketDataRepository, TradeRepository, ValuationRepository
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -20,6 +20,7 @@ class DBSessionManager:
 
     def __enter__(self):
         self.session = self.session_factory()
+        self.audit = AuditRepository(self.session)
         self.trades = TradeRepository(self.session)
         self.valuations = ValuationRepository(self.session)
         self.instruments = InstrumentRepository(self.session)

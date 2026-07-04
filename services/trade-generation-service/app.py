@@ -78,7 +78,8 @@ def stop_generation():
 
 @app.route("/status", method=["GET"])
 def status():
-    return trade_intentions_service.generator_state
+    state = trade_intentions_service.generator_state
+    return {k: v for k, v in state.items() if k != "thread"}
 
 
 if __name__ == "__main__":

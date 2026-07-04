@@ -2,7 +2,7 @@ import time
 import logging
 from datetime import datetime, timezone
 from urllib import request
-from models import ServiceStatus
+from shared.trading_shared.enums import ServiceStatus
 
 health_cache = {}
 
@@ -15,15 +15,15 @@ def check_service_health(url, service_name):
     start_time = time.perf_counter()
     last_checked = (
         datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
-    )    
+    )
     logging.info(f"Checking health for {service_name}...")
-    
+
     try:
         with request.urlopen(url, timeout=2) as response:
             response.read()
             end_time = time.perf_counter()
             response_time_ms = int((end_time - start_time) * 1000)
-            
+
             return {
                 "status": ServiceStatus.UP.value,
                 "last_checked": last_checked,
@@ -38,7 +38,7 @@ def check_service_health(url, service_name):
             clean_error = raw_error.split("]")[-1].strip()
         else:
             clean_error = raw_error
-            
+
         return {
             "status": ServiceStatus.DOWN.value,
             "error": clean_error,
@@ -50,10 +50,19 @@ def monitoring_worker():
     while True:
         market_data_status = check_service_health("http://market-data-service:8001/health", "market-data-service")
         pricing_status = check_service_health("http://pricing-service:8002/health", "pricing-service")
+        trade_generation_status = check_service_health("http://trade-generation-service:8003/health", "trade-generation-service")
+        trade_action_status = check_service_health("http://trade-action-service:8004/health", "trade-action-service")
+        book_service_status = check_service_health("http://book-service:8005/health", "book-service")
+        blotter_service_status = check_service_health("http://blotter-service:8006/health", "blotter-service")
+        postgres_status = check_service_health("http://postgres:5432", "postgres")
 
         current_states = {
             "market-data-service": market_data_status,
             "pricing-service": pricing_status,
+            "trade-generation-service": trade_generation_status,
+            "trade-action-service": trade_action_status,
+            "book-service": book_service_status,
+            "blotter-service": blotter_service_status,
         }
 
         for service_name, status_data in current_states.items():
@@ -62,7 +71,7 @@ def monitoring_worker():
 
             if current_status == ServiceStatus.DOWN.value and prev_status != ServiceStatus.DOWN.value:
                 logging.warning(f"Service Unavailability Detected: {service_name} is DOWN! Error: {status_data.get('error')}")
-            
+
             elif current_status == ServiceStatus.UP.value and prev_status == ServiceStatus.DOWN.value:
                 logging.info(f"Service Recovery Detected: {service_name} is back UP!")
 

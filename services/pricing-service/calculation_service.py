@@ -8,7 +8,8 @@ from shared.trading_shared.models import Valuation
 
 pricing_lock = threading.Lock()
 metrics_queue = queue.Queue()   # consumed by metrics_worker for internal stats
-sse_queue = queue.Queue()       # consumed by /valuation-stream SSE endpoint
+sse_subscribers = []            # list of per-client queues for /valuation-stream
+sse_subscribers_lock = threading.Lock()
 
 valuations_store = {}           # keyed by str(trade_id) -> latest valuation dict
 
@@ -165,7 +166,9 @@ def _price_trade(tick, trade, asset_type):
         "value": fair_value,
     })
     logging.info(f"Published valuation for trade {trade_id} to metrics queue.")
-    sse_queue.put(valuation_data)
+    with sse_subscribers_lock:
+        for subscriber_queue in sse_subscribers:
+            subscriber_queue.put(valuation_data)
 
 
 def recalculate_valuations(tick):

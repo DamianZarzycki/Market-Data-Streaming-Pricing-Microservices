@@ -86,15 +86,11 @@ def update_book(book_id):
 
 @app.route("/books/<book_id>", method=["DELETE"])
 def delete_book(book_id):
-    book = books_manager_service.delete_book(db, book_id)
+    books_manager_service.delete_book(db, book_id)
     return {"message": f"Book with id {book_id} marked as inactive"}
 
 
 if __name__ == "__main__":
     logging.info("Starting Books service...")
-
-    # monitoring_thread = threading.Thread()
-    # monitoring_thread.daemon = True
-    # monitoring_thread.start()
 
     app.run(host="0.0.0.0", port=8004)

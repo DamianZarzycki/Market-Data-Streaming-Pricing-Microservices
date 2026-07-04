@@ -1,5 +1,3 @@
-from typing import Optional
-
 from shared.trading_shared.enums import EventType, Severity
 from shared.trading_shared.models import AuditLog
 
@@ -14,10 +12,10 @@ class AuditLogger:
         event_type: EventType,
         severity: Severity,
         message: str,
-        entity_type: Optional[str] = None,
-        entity_id: Optional[str] = None,
-        correlation_id: Optional[str] = None,
-        payload: Optional[dict] = None,
+        entity_type: str = None,
+        entity_id: str = None,
+        correlation_id: str = None,
+        payload: dict = None,
     ) -> None:
         audit_entry = AuditLog(
             service_name=self.service_name,
@@ -38,10 +36,10 @@ class AuditLogger:
         self,
         event_type: EventType,
         message: str,
-        entity_type: Optional[str] = None,
-        entity_id: Optional[str] = None,
-        correlation_id: Optional[str] = None,
-        payload: Optional[dict] = None,
+        entity_type: str = None,
+        entity_id: str = None,
+        correlation_id: str = None,
+        payload: dict = None,
     ) -> None:
         self.write(event_type, Severity.INFO, message, entity_type, entity_id, correlation_id, payload)
 
@@ -49,10 +47,10 @@ class AuditLogger:
         self,
         event_type: EventType,
         message: str,
-        entity_type: Optional[str] = None,
-        entity_id: Optional[str] = None,
-        correlation_id: Optional[str] = None,
-        payload: Optional[dict] = None,
+        entity_type: str = None,
+        entity_id: str = None,
+        correlation_id: str = None,
+        payload: dict = None,
     ) -> None:
         self.write(event_type, Severity.WARNING, message, entity_type, entity_id, correlation_id, payload)
 
@@ -60,9 +58,9 @@ class AuditLogger:
         self,
         event_type: EventType,
         message: str,
-        entity_type: Optional[str] = None,
-        entity_id: Optional[str] = None,
-        correlation_id: Optional[str] = None,
-        payload: Optional[dict] = None,
+        entity_type: str = None,
+        entity_id: str = None,
+        correlation_id: str = None,
+        payload: dict = None,
     ) -> None:
         self.write(event_type, Severity.ERROR, message, entity_type, entity_id, correlation_id, payload)

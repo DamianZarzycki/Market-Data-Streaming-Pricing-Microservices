@@ -62,3 +62,8 @@ class AssetClass(str, Enum):
 class ServiceStatus(str, Enum):
     UP = "UP"
     DOWN = "DOWN"
+
+class ConnectionStatus(str, Enum):
+    CONNECTED = "CONNECTED"
+    DISCONNECTED = "DISCONNECTED"
+    RECONNECTING = "RECONNECTING"

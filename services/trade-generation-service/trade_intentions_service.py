@@ -1,5 +1,6 @@
 import datetime
 import random
+import time
 import uuid
 from shared.trading_shared.db import DBSessionManager
 from shared.trading_shared.enums import ActionType, TradeStatus
@@ -18,13 +19,19 @@ def fetch_json(url, method="GET", headers=None, data=None):
     if headers is None:
         headers = {}
 
-    try:
-        req = urllib.request.Request(url, method=method, headers=headers, data=data)
-        with urllib.request.urlopen(req) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except Exception as e:
-        logging.error(f"Failed to fetch data from {url}: {e}")
-        return None
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(url, method=method, headers=headers, data=data)
+            with urllib.request.urlopen(req, timeout=5) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except Exception as e:
+            delay = min(1.0 * (2 ** attempt), 30)
+            if attempt < 3 - 1:
+                logging.warning(f"Request to {url} failed (attempt {attempt + 1}/3): {e}. Retrying in {delay:.1f}s...")
+                time.sleep(delay)
+            else:
+                logging.error(f"Request to {url} failed after 3 attempts: {e}")
+    return None
 
 def send_to_trade_action_service(payload):
     if isinstance(payload, list):
@@ -97,7 +104,7 @@ def generate_random_intention():
 
             if action == ActionType.CLOSE_TRADE.value:
                 logging.info("Checking for active trades to close...")
-                active_trades = db.trades.get_trades(None, status=TradeStatus.ACTIVE.value, symbol=None, first_only=True)
+                active_trades = db.trades.get_trades(None, status=TradeStatus.ACTIVE.value, symbol=None)
 
                 if not active_trades:
                     logging.info(
@@ -106,11 +113,8 @@ def generate_random_intention():
                     action = ActionType.OPEN_TRADE.value
                 else:
                     trade_to_close = random.choice(active_trades)
-                    tradde = db.query(Trade).filter_by(trade_id=trade_to_close.trade_id).first()
                     logging.info(f"Found trade. Selected: {trade_to_close}")
                     logging.info(f"Found trade. Selected ID: {trade_to_close.trade_id}")
-
-                    logging.info(f"Found tradde: {tradde}")
 
                     payload = {
                         "action_type": ActionType.CLOSE_TRADE.value,

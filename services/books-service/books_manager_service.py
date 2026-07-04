@@ -1,9 +1,11 @@
 from datetime import datetime, timezone
 import logging
 
+from shared.trading_shared.audit import AuditLogger
+from shared.trading_shared.enums import EntityType, EventType
 from shared.trading_shared.models import Book
 
-
+audit_logger = AuditLogger("books-manager-service")
 def get_all_books(db, is_active=True):
     logging.info(f"Fetching all books with is_active={is_active}")
     books = db.query(Book).filter(Book.is_active == is_active).all()
@@ -71,6 +73,12 @@ def create_books_batch(db, books_data: list, created_by=None):
         created_books.append(new_book)
 
     db.commit()
+    audit_logger.info(
+        event_type=EventType.CREATED,
+        message=f"Created {len(created_books)} new books",
+        entity_type=EntityType.BOOK.value,
+        payload={"created_books": [str(b.book_id) for b in created_books], "performed_by": created_by},
+    )
     return [str(b.book_id) for b in created_books]
 
 
@@ -102,6 +110,13 @@ def update_book(db, book_id, data, updated_by=None):
         book.updated_by = updated_by
 
     db.commit()
+    audit_logger.info(
+        event_type=EventType.UPDATED,
+        message=f"Updated book with id {book_id}",
+        entity_type=EntityType.BOOK.value,
+        entity_id=str(book_id),
+        payload={"performed_by": updated_by},
+    )
     return book
 
 
@@ -111,4 +126,11 @@ def delete_book(db, book_id):
         return {"error": "Book not found"}
 
     book.is_active = False
+    db.commit()
+    audit_logger.info(
+        event_type=EventType.DELETED,
+        message=f"Book {book_id} marked as inactive",
+        entity_type=EntityType.BOOK.value,
+        entity_id=str(book_id),
+    )
     return {"message": f"Book with id {book_id} marked as inactive"}
