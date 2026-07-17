@@ -74,7 +74,7 @@ def create_books_batch(db, books_data: list, created_by=None):
 
     db.commit()
     audit_logger.info(
-        event_type=EventType.CREATED,
+        event_type=EventType.DB_CREATE,
         message=f"Created {len(created_books)} new books",
         entity_type=EntityType.BOOK.value,
         payload={"created_books": [str(b.book_id) for b in created_books], "performed_by": created_by},
@@ -111,7 +111,7 @@ def update_book(db, book_id, data, updated_by=None):
 
     db.commit()
     audit_logger.info(
-        event_type=EventType.UPDATED,
+        event_type=EventType.DB_UPDATE,
         message=f"Updated book with id {book_id}",
         entity_type=EntityType.BOOK.value,
         entity_id=str(book_id),
@@ -128,7 +128,7 @@ def delete_book(db, book_id):
     book.is_active = False
     db.commit()
     audit_logger.info(
-        event_type=EventType.DELETED,
+        event_type=EventType.DB_DELETE,
         message=f"Book {book_id} marked as inactive",
         entity_type=EntityType.BOOK.value,
         entity_id=str(book_id),

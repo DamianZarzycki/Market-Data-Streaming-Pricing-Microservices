@@ -29,17 +29,16 @@ class SnapshotType(str, Enum):
     CURVE = "CURVE"
 
 class EventType(str, Enum):
-    CREATED = "CREATED"
-    UPDATED = "UPDATED"
-    DELETED = "DELETED"
-    CLOSED = "CLOSED"
-    REJECTED = "REJECTED"
-    ERROR = "ERROR"
+    DB_CREATE = "DB_CREATE"
+    DB_UPDATE = "DB_UPDATE"
+    DB_DELETE = "DB_DELETE"
+    DB_CLOSE = "DB_CLOSE"
+    DB_REJECT = "DB_REJECT"
+    DB_ERROR = "DB_ERROR"
     STREAM_CONNECTED = "STREAM_CONNECTED"
     STREAM_DISCONNECTED = "STREAM_DISCONNECTED"
     STREAM_RECONNECTED = "STREAM_RECONNECTED"
     SNAPSHOT_GENERATED = "SNAPSHOT_GENERATED"
-    DB_ERROR = "DB_ERROR"
     WORKER_STARTED = "WORKER_STARTED"
     WORKER_STOPPED = "WORKER_STOPPED"
 
@@ -58,6 +57,17 @@ class AssetClass(str, Enum):
     EQUITY = "EQUITY"
     BOND = "BOND"
     FX = "FX"
+    OPTION = "OPTION"
+    IRS = "IRS"
+    FUTURES = "FUTURES"
+    COMMODITY = "COMMODITY"
+
+class OptionType(str, Enum):
+    EUROPEAN = "EUROPEAN"
+
+class OptionRightType(str, Enum):
+    CALL = "CALL"
+    PUT = "PUT"
 
 class ServiceStatus(str, Enum):
     UP = "UP"

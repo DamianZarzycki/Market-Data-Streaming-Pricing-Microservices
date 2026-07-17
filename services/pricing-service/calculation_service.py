@@ -4,7 +4,9 @@ import queue
 import threading
 import uuid
 from shared.trading_shared.db import DBSessionManager
+from shared.trading_shared.enums import TradeSide
 from shared.trading_shared.models import Valuation
+from math import erf, sqrt, log
 
 pricing_lock = threading.Lock()
 metrics_queue = queue.Queue()   # consumed by metrics_worker for internal stats
@@ -37,9 +39,9 @@ def calculate_pnl(side, trade_price, current_price, quantity, multiplier=1.0):
     current_price = float(current_price)
     quantity = float(quantity)
     multiplier = float(multiplier)
-    if side == "BUY":
+    if side == TradeSide.BUY.value:
         return round((current_price - trade_price) * quantity * multiplier, 4)
-    elif side == "SELL":
+    elif side == TradeSide.SELL.value:
         return round((trade_price - current_price) * quantity * multiplier, 4)
     else:
         logging.error(f"Unknown trade side: {side}")
@@ -104,6 +106,20 @@ def _price_trade(tick, trade, asset_type):
         multiplier = float(contract_multiplier)
         fair_value = round(current_price * multiplier * quantity, 4)
         market_value = fair_value
+    
+    elif asset_type == "OPTION":
+        spot = tick.get("spot")
+        rate = tick.get("rate")
+        volatility = tick.get("volatility")
+        time_to_expiration = tick.get("time_to_expiration")
+        strike = tick.get("strike")
+        option_right_type = tick.get("option_right_type")
+        if spot is None or rate is None or volatility is None or time_to_expiration is None or strike is None or option_right_type is None:
+            return
+        current_price = spot * normal_cdf((log(spot / strike) + (rate + 0.5 * volatility ** 2) * time_to_expiration) / (volatility * sqrt(time_to_expiration)))
+        fair_value = round(current_price * quantity, 4)
+        market_value = fair_value
+        
 
     current_price = round(current_price, 6)
     unrealized_pnl = calculate_pnl(side, trade_price, current_price, quantity, multiplier)
@@ -192,3 +208,4 @@ def recalculate_valuations(tick):
             _price_trade(tick, trade, asset_type)
         except Exception as e:
             logging.error(f"Error pricing trade {trade.trade_id}: {e}")
+

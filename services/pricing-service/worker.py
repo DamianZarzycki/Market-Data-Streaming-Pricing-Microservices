@@ -56,7 +56,6 @@ def read_events(stream_response):
 
 
 def update_market_state(tick):
-    # received for 'None' sometimes
     logging.info(f"Received tick for: {tick.get('symbol')}")
     calculation_service.metrics_queue.put({"type": "TICK_RECEIVED", "timestamp": tick.get("timestamp")})
 
@@ -69,6 +68,7 @@ def pricing_worker():
             stream_response = connect_to_market_data_stream()
 
             for tick in read_events(stream_response):
+                logging.info(f"Read tick: {tick}")
                 update_market_state(tick)
                 calculation_service.recalculate_valuations(tick)
 

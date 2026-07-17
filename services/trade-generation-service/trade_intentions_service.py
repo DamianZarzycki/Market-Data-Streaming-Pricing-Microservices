@@ -3,7 +3,7 @@ import random
 import time
 import uuid
 from shared.trading_shared.db import DBSessionManager
-from shared.trading_shared.enums import ActionType, TradeStatus
+from shared.trading_shared.enums import ActionType, TradeStatus, TradeSide
 from shared.trading_shared.models import Trade
 import logging
 import urllib.request
@@ -175,7 +175,7 @@ def generate_random_intention():
                     "book_id": book.get("book_id"),
                     "asset_class": book_asset_class,
                     "symbol": symbol,
-                    "side": random.choice(["BUY", "SELL"]),
+                    "side": random.choice([TradeSide.BUY.value, TradeSide.SELL.value]),
                     "quantity": random.randint(1, 100) * 10,
                     "trade_price": round(random.uniform(50.0, 150.0), 4),
                     "currency": "USD",

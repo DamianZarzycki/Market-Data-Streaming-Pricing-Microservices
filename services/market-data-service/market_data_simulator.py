@@ -1,5 +1,5 @@
 import random
-
+from shared.trading_shared.enums import OptionRightType
 
 class MarketDataSimulator:
     def __init__(self):
@@ -16,6 +16,8 @@ class MarketDataSimulator:
         self.__usd_curve_rates = [0.041, 0.042, 0.044, 0.047]
         self.__eur_curve_rates = [0.031, 0.032, 0.033, 0.035]
         self.__curve_volatility = 0.0002
+        self.__option_volatility = 0.35
+        self.__option_spot = 100.0
 
     def generate_equity_tick(self):
         price_movement = random.normalvariate(0, self.__acme_volatility)
@@ -29,26 +31,38 @@ class MarketDataSimulator:
 
         return {"bid": round(bid, 4), "ask": round(ask, 4), "last": round(last, 4)}
 
-    def generate_bond_tick(self):
+    def generate_bond_tick(self) -> float:
         self.__govt_yield += random.normalvariate(0, self.__yield_volatility)
         self.__govt_yield = max(0.001, self.__govt_yield)
 
         return round(self.__govt_yield, 4)
 
-    def generate_fx_tick(self):
+    def generate_fx_tick(self) -> float:
         self.__eurusd_spot += random.normalvariate(0, self.__fx_volatility)
         return round(self.__eurusd_spot, 4)
 
-    def generate_usd_curve_tick(self):
+    def generate_usd_curve_tick(self) -> list[float]:
         self.__usd_curve_rates = [
             max(0.001, r + random.normalvariate(0, self.__curve_volatility))
             for r in self.__usd_curve_rates
         ]
         return [round(r, 4) for r in self.__usd_curve_rates]
 
-    def generate_eur_curve_tick(self):
+    def generate_eur_curve_tick(self) -> list[float]:
         self.__eur_curve_rates = [
             max(0.001, r + random.normalvariate(0, self.__curve_volatility))
             for r in self.__eur_curve_rates
         ]
         return [round(r, 4) for r in self.__eur_curve_rates]
+
+    def generate_option_details(self) -> dict:
+        self.__option_spot += random.normalvariate(0, self.__option_volatility)
+        self.__option_spot = max(0.01, self.__option_spot)
+        self.__option_strike = random.uniform(0.9 * self.__option_spot, 1.1 * self.__option_spot)
+        self.__option_right_type = random.choice([OptionRightType.CALL.value, OptionRightType.PUT.value])
+        return {
+            "spot": round(self.__option_spot, 4),
+            "strike": round(self.__option_strike, 4),
+            "option_right_type": self.__option_right_type,
+            "maturity_years": round(random.uniform(0.1, 0.5), 2),
+        }

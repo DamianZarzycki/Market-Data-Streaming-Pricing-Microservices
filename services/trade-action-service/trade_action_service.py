@@ -30,7 +30,7 @@ def submit_trade_action(data):
     if error:
         logging.warning(f"Rejected request: {error}")
         audit_logger.warning(
-            EventType.REJECTED,
+            EventType.DB_REJECT,
             f"Trade action rejected: {error}",
             payload={"action_type": data.get("action_type"), "client_request_id": data.get("client_request_id")},
         )
@@ -43,7 +43,7 @@ def submit_trade_action(data):
     except queue_module.Full:
         logging.error(f"Queue full. Rejected request: {client_request_id}")
         audit_logger.error(
-            EventType.ERROR,
+            EventType.DB_ERROR,
             f"Trade action queue full. Rejected: {client_request_id}",
             correlation_id=client_request_id,
         )
@@ -71,7 +71,7 @@ def submit_trade_action_batch(items):
         except queue_module.Full:
             logging.error("Queue full during batch processing.")
             audit_logger.error(
-                EventType.ERROR,
+                EventType.DB_ERROR,
                 "Trade action queue full during batch processing",
                 correlation_id=item.get("client_request_id"),
             )

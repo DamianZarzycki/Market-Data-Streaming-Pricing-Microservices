@@ -4,8 +4,10 @@ import uuid
 import logging
 from shared.trading_shared.audit import AuditLogger
 from shared.trading_shared.db import DBSessionManager
-from shared.trading_shared.enums import ActionType, EntityType, EventType, Severity
+from shared.trading_shared.enums import ActionType, AssetClass, EntityType, EventType, OptionRightType, Severity
 from shared.trading_shared.models import Instrument, Trade, Valuation
+
+from option_pricing_service import calculate_european_call_option_price, calculate_european_put_option_price
 
 trade_queue = queue.Queue()
 audit_logger = AuditLogger("trade-action-service")
@@ -30,7 +32,7 @@ def trade_action_handler(data):
             action_type = data.get("action_type")
             client_request_id = data.get("client_request_id")
             audit_logger.info(
-                EventType.CREATED,
+                EventType.DB_CREATE,
                 f"Processing trade action: {action_type} for client_request_id: {client_request_id}",
                 entity_type=EntityType.TRADE.value,
                 correlation_id=client_request_id,
@@ -48,7 +50,7 @@ def trade_action_handler(data):
                             f"already maps to trade {existing.trade_id}"
                         )
                         audit_logger.warning(
-                            EventType.REJECTED,
+                            EventType.DB_REJECT,
                             f"Duplicate OPEN_TRADE ignored for client_request_id {client_request_id}",
                             entity_type=EntityType.TRADE.value,
                             correlation_id=client_request_id,
@@ -61,11 +63,27 @@ def trade_action_handler(data):
                 logging.info(f"SYMBOL: {symbol}.")
                 instrument = db.instruments.get_by_symbol(symbol)
                 logging.info(f"INSTRUMENT: {instrument}.")
+                logging.info(f"ASSET_CLASS: {asset_class}.")
                 if not instrument:
                     logging.info(f"Instrument not found: {symbol}. Creating new instrument.")
                     instrument = Instrument(symbol=symbol, asset_class=asset_class, multiplier=1)
                     db.instruments.add(instrument)
                     db.flush()
+
+                if asset_class == AssetClass.OPTION.value:
+                    logging.info(f"OPTION: {data}.")
+                    
+                    option_right_type = data.get("option_right_type")
+                    option_details = {
+                        "spot": data.get("spot"),
+                        "strike": data.get("strike"),
+                        "volatility": data.get("volatility"),
+                        "maturity_years": data.get("maturity_years"),
+                    }
+                    option_price = calculate_european_call_option_price(option_details) if option_right_type == OptionRightType.CALL.value else calculate_european_put_option_price(option_details)
+                    trade_price = option_price
+                else:
+                    trade_price = data.get("trade_price")
 
                 new_trade = Trade(
                     client_request_id=client_request_id,
@@ -75,7 +93,7 @@ def trade_action_handler(data):
                     instrument_id=instrument.instrument_id,
                     side=data.get("side"),
                     quantity=data.get("quantity"),
-                    trade_price=data.get("trade_price"),
+                    trade_price=trade_price,
                     trade_currency=data.get("currency"),
                     trade_date=datetime.now(timezone.utc),
                     status="ACTIVE",
@@ -106,7 +124,7 @@ def trade_action_handler(data):
                             f"already closed trade {trade_id_to_close}"
                         )
                         audit_logger.warning(
-                            EventType.REJECTED,
+                            EventType.DB_REJECT,
                             f"Duplicate CLOSE_TRADE ignored for client_request_id {client_request_id}",
                             entity_type=EntityType.TRADE.value,
                             entity_id=str(trade_id_to_close),
@@ -115,7 +133,7 @@ def trade_action_handler(data):
                         return
 
                 audit_logger.info(
-                        EventType.CLOSED,
+                        EventType.DB_CLOSE,
                         f"Closing trade: {trade_id_to_close}",
                         entity_type=EntityType.TRADE.value,
                         entity_id=str(trade_id_to_close),
@@ -133,7 +151,7 @@ def trade_action_handler(data):
                 if not trade_to_close:
                     logging.error(f"Trade not found in database with ID: {trade_id_to_close}")
                     audit_logger.warning(
-                        EventType.ERROR,
+                        EventType.DB_ERROR,
                         f"CLOSE_TRADE failed: trade {trade_id_to_close} not found",
                         entity_type=EntityType.TRADE.value,
                         entity_id=str(trade_id_to_close),
@@ -144,7 +162,7 @@ def trade_action_handler(data):
                 if trade_to_close.status != "ACTIVE":
                     logging.warning(f"Trade {trade_id_to_close} is already closed or inactive.")
                     audit_logger.warning(
-                        EventType.REJECTED,
+                        EventType.DB_REJECT,
                         f"CLOSE_TRADE rejected: trade {trade_id_to_close} is not ACTIVE",
                         entity_type=EntityType.TRADE.value,
                         entity_id=str(trade_id_to_close),
@@ -195,7 +213,7 @@ def trade_action_handler(data):
 
             if action_type == ActionType.OPEN_TRADE.value:
                 audit_logger.info(
-                    EventType.CREATED,
+                    EventType.DB_CREATE,
                     f"Trade opened: {new_trade.trade_id}",
                     entity_type=EntityType.TRADE.value,
                     entity_id=str(new_trade.trade_id),
@@ -204,7 +222,7 @@ def trade_action_handler(data):
                 )
             elif action_type == ActionType.CLOSE_TRADE.value:
                 audit_logger.info(
-                    EventType.CLOSED,
+                    EventType.DB_CLOSE,
                     f"Trade closed: {trade_id_to_close}",
                     entity_type=EntityType.TRADE.value,
                     entity_id=str(trade_id_to_close),

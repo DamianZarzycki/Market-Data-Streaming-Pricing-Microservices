@@ -1,7 +1,7 @@
 from shared.trading_shared.db import DBSessionManager
 from shared.trading_shared.enums import CurveType
 from shared.trading_shared.models import MarketDataCurve, MarketDataSpotPrice
-from shared.trading_shared.enums import AssetClass, EventType, ServiceStatus
+from shared.trading_shared.enums import AssetClass, EventType, ServiceStatus, OptionRightType, OptionType
 from shared.trading_shared.audit import AuditLogger
 
 import json
@@ -85,52 +85,68 @@ def generate_market_tick():
     usd_rates = market_simulator.generate_usd_curve_tick()
     eur_rates = market_simulator.generate_eur_curve_tick()
 
+    option_details = market_simulator.generate_option_details()
+
     market_tick_data = {
-        "ACME": {
-            "event_id": global_event_id - 4,
-            "asset_type": AssetClass.EQUITY.value,
+        "ACME_OPT": {
+            "event_id": global_event_id - 5,
+            "asset_type": AssetClass.OPTION.value,
             "timestamp": current_tmsp,
+            "type": OptionType.EUROPEAN.value,
             "symbol": "ACME",
-            "bid": eq_tick["bid"],
-            "ask": eq_tick["ask"],
-            "last": eq_tick["last"],
+            "spot": option_details["spot"],
+            "strike": option_details["strike"],
+            "option_right_type": option_details["option_right_type"],
+            "maturity_years": option_details["maturity_years"],
+            "quantity": 100
         },
-        "GOVT_5Y": {
-            "event_id": global_event_id - 3,
-            "asset_type": AssetClass.BOND.value,
-            "timestamp": current_tmsp,
-            "symbol": "GOVT_5Y",
-            "yield": bond_yield,
-        },
-        "EURUSD": {
-            "event_id": global_event_id - 2,
-            "asset_type": AssetClass.FX.value,
-            "symbol": "EURUSD",
-            "timestamp": current_tmsp,
-            "spot": fx_spot,
-            # "domestic_rate": 0.045,
-            # "foreign_rate": 0.032,
-            # "tenor_years": 1,
-            # DO PRICING SERVICE
-        },
-        "USD_YIELD_CURVE": {
-            "event_id": global_event_id - 1,
-            "curve_name": "USD_YIELD_CURVE",
-            "curve_type": CurveType.YIELD_CURVE.value,
-            "currency": "USD",
-            "tenors": ["1M", "3M", "1Y", "5Y"],
-            "rates": usd_rates,
-            "timestamp": current_tmsp,
-        },
-        "EUR_YIELD_CURVE": {
-            "event_id": global_event_id,
-            "curve_name": "EUR_YIELD_CURVE",
-            "curve_type": CurveType.YIELD_CURVE.value,
-            "currency": "EUR",
-            "tenors": ["1M", "3M", "1Y", "5Y"],
-            "rates": eur_rates,
-            "timestamp": current_tmsp,
-        },
+        # "ACME": {
+        #     "event_id": global_event_id - 4,
+        #     "asset_type": AssetClass.EQUITY.value,
+        #     "timestamp": current_tmsp,
+        #     "symbol": "ACME",
+        #     "bid": eq_tick["bid"],
+        #     "ask": eq_tick["ask"],
+        #     "last": eq_tick["last"],
+        # },
+        # "GOVT_5Y": {
+        #     "event_id": global_event_id - 3,
+        #     "asset_type": AssetClass.BOND.value,
+        #     "timestamp": current_tmsp,
+        #     "symbol": "GOVT_5Y",
+        #     "yield": bond_yield,
+        # },
+        # "EURUSD": {
+        #     "event_id": global_event_id - 2,
+        #     "asset_type": AssetClass.FX.value,
+        #     "symbol": "EURUSD",
+        #     "timestamp": current_tmsp,
+        #     "spot": fx_spot,
+        #     # "domestic_rate": 0.045,
+        #     # "foreign_rate": 0.032,
+        #     # "tenor_years": 1,
+        #     # DO PRICING SERVICE
+        # },
+        # "USD_YIELD_CURVE": {
+        #     "event_id": global_event_id - 1,
+        #     "symbol": "USD_YIELD_CURVE",
+        #     "curve_name": "YIELD_CURVE",
+        #     "curve_type": CurveType.YIELD_CURVE.value,
+        #     "currency": "USD",
+        #     "tenors": ["1M", "3M", "1Y", "5Y"],
+        #     "rates": usd_rates,
+        #     "timestamp": current_tmsp,
+        # },
+        # "EUR_YIELD_CURVE": {
+        #     "event_id": global_event_id,
+        #     "symbol": "EUR_YIELD_CURVE",
+        #     "curve_name": "YIELD_CURVE",
+        #     "curve_type": CurveType.YIELD_CURVE.value,
+        #     "currency": "EUR",
+        #     "tenors": ["1M", "3M", "1Y", "5Y"],
+        #     "rates": eur_rates,
+        #     "timestamp": current_tmsp,
+        # },
     }
 
     metrics_queue.put({"type": "EVENT_GENERATED", "timestamp": current_tmsp})
@@ -154,6 +170,7 @@ def update_snapshot(market_tick_data):
 def publish_tick_to_stream(market_tick_data):
     with data_lock:
         for _, instrument_data in market_tick_data.items():
+            logging.info(f"Publishing tick to stream: {instrument_data}")
             msg = f"data: {json.dumps(instrument_data)}\n\n"
             for subscriber_queue in subscribers:
                 subscriber_queue.put(msg)
@@ -242,7 +259,7 @@ def db_worker():
                         logging.info(f"Saved {batch_count} market data records to DB")
                         buffer.clear()
                         audit_logger.info(
-                            EventType.DB_WRITE,
+                            EventType.DB_CREATE,
                             f"Market data batch saved: {batch_count} records",
                             payload={"record_count": batch_count},
                         )

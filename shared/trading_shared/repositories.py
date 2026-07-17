@@ -7,7 +7,7 @@ from shared.trading_shared.models import (
     Trade,
     Valuation,
 )
-
+import logging
 
 class AuditRepository:
     def __init__(self, db_session):
@@ -114,5 +114,6 @@ class MarketDataRepository:
         )
 
     def add_all(self, market_data_list):
+        logging.info(f"Attempt to add {len(market_data_list)} market data records to DB")
         self.db_session.add_all(market_data_list)
 

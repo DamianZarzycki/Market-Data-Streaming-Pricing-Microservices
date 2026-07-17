@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Seed 3 Books via the books-service REST API.
+# Seed 4 Books via the books-service REST API.
 # Usage: bash db/seed_books.sh [BASE_URL]
 # Default BASE_URL: http://localhost:8004
 
@@ -29,6 +29,14 @@ curl -s -X POST "${BASE_URL}/books" \
     "name": "FX Book",
     "description": "Holds foreign-exchange spot and forward positions.",
     "expected_asset_class": "FX"
+  }' | python3 -m json.tool
+
+curl -s -X POST "${BASE_URL}/books" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "European Options Book",
+    "description": "Holds European call/put option positions.",
+    "expected_asset_class": "OPTION"
   }' | python3 -m json.tool
 
 echo "Done."

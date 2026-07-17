@@ -1,3 +1,11 @@
+# Startup gate reused by every app service: don't boot until the one-shot
+# migrations container has finished (it in turn waits for Postgres to be
+# healthy). Without this the services race the DB and die with "connection
+# refused" on a cold start.
+x-depends-on-db: &depends-on-db
+  db-migrations:
+    condition: service_completed_successfully
+
 services:
   postgres:
       image: postgres:15
@@ -31,8 +39,9 @@ services:
     volumes:
       - ./shared:/app/shared
     environment:
-      - TICK_INTERVAL_MS=100
+      - TICK_INTERVAL_MS=1500
       - DATABASE_URL=${DATABASE_URL}
+    depends_on: *depends-on-db
   pricing-service:
     build: ./services/pricing-service
     ports:
@@ -41,6 +50,7 @@ services:
       - ./shared:/app/shared
     environment:
       - DATABASE_URL=${DATABASE_URL}
+    depends_on: *depends-on-db
   # monitoring-service:
   #   build: ./services/monitoring-service
   #   ports:
@@ -53,6 +63,7 @@ services:
       - ./shared:/app/shared
     environment:
       - DATABASE_URL=${DATABASE_URL}
+    depends_on: *depends-on-db
   blotter-service:
     build: ./services/blotter-service
     ports:
@@ -61,6 +72,7 @@ services:
       - ./shared:/app/shared
     environment:
       - DATABASE_URL=${DATABASE_URL}
+    depends_on: *depends-on-db
   trade-generation-service:
     build: ./services/trade-generation-service
     ports:
@@ -70,6 +82,7 @@ services:
     environment:
       - DATABASE_URL=${DATABASE_URL}
       - TRADE_GENERATION_INTERVAL_MS=${TRADE_GENERATION_INTERVAL_MS}
+    depends_on: *depends-on-db
   trade-action-service:
     build: ./services/trade-action-service
     ports:
@@ -78,4 +91,5 @@ services:
       - ./shared:/app/shared
     environment:
       - DATABASE_URL=${DATABASE_URL}
+    depends_on: *depends-on-db
     
