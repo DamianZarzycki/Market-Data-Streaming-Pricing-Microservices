@@ -3,10 +3,11 @@ from bottle import Bottle, request, response  # <-- TUTAJ POPRAWA IMPORTU
 
 from shared.trading_shared.db import SessionLocal
 from shared.trading_shared.enums import ServiceStatus
+from shared.trading_shared.logging_config import configure_logging
 
 import books_manager_service
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
+configure_logging("books-service")
 
 app = Bottle()
 

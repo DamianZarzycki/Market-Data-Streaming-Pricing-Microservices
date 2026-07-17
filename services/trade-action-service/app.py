@@ -3,11 +3,12 @@ import threading
 from bottle import Bottle, request, response
 from shared.trading_shared.audit import AuditLogger
 from shared.trading_shared.enums import EventType
+from shared.trading_shared.logging_config import configure_logging
 import trade_action_service
 from custom_server import ThreadedServer
 import worker
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
+configure_logging("trade-action-service")
 app = Bottle()
 
 

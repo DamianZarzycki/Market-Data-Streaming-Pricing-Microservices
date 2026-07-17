@@ -4,10 +4,11 @@ import threading
 import trade_intentions_service
 from bottle import Bottle, response
 from shared.trading_shared.enums import ServiceStatus
+from shared.trading_shared.logging_config import configure_logging
 from custom_server import ThreadedServer
 
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
+configure_logging("trade-generation-service")
 app = Bottle()
 
 

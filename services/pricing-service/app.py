@@ -7,10 +7,11 @@ from custom_server import ThreadedServer
 
 from shared.trading_shared.audit import AuditLogger
 from shared.trading_shared.enums import EventType
+from shared.trading_shared.logging_config import configure_logging
 import worker
 import calculation_service
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
+configure_logging("pricing-service")
 app = Bottle()
 
 
