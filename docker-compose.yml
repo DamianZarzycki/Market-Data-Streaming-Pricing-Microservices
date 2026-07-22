@@ -39,7 +39,7 @@ services:
     volumes:
       - ./shared:/app/shared
     environment:
-      - TICK_INTERVAL_MS=1500
+      - TICK_INTERVAL_MS=8000
       - DATABASE_URL=${DATABASE_URL}
     depends_on: *depends-on-db
   pricing-service:

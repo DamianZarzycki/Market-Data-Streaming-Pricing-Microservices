@@ -1,8 +1,8 @@
 import datetime
 import random
-import time
 import uuid
 from shared.trading_shared.db import DBSessionManager
+from shared.trading_shared.decorators import retry
 from shared.trading_shared.enums import ActionType, TradeStatus, TradeSide
 from shared.trading_shared.models import Trade
 import logging
@@ -15,23 +15,14 @@ generator_state = {"is_running": False, "total_generated": 0, "thread": None}
 # jak constrainy moze wplynac na transakcje DB -> duze tabele i sprawdzanie id w trakcie insertow
 # profiling
 
+@retry(max_attempts=3)
 def fetch_json(url, method="GET", headers=None, data=None):
     if headers is None:
         headers = {}
 
-    for attempt in range(3):
-        try:
-            req = urllib.request.Request(url, method=method, headers=headers, data=data)
-            with urllib.request.urlopen(req, timeout=5) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except Exception as e:
-            delay = min(1.0 * (2 ** attempt), 30)
-            if attempt < 3 - 1:
-                logging.warning(f"Request to {url} failed (attempt {attempt + 1}/3): {e}. Retrying in {delay:.1f}s...")
-                time.sleep(delay)
-            else:
-                logging.error(f"Request to {url} failed after 3 attempts: {e}")
-    return None
+    req = urllib.request.Request(url, method=method, headers=headers, data=data)
+    with urllib.request.urlopen(req, timeout=5) as response:
+        return json.loads(response.read().decode("utf-8"))
 
 def send_to_trade_action_service(payload):
     if isinstance(payload, list):
@@ -41,16 +32,15 @@ def send_to_trade_action_service(payload):
         url = "http://trade-action-service:8080/trade-actions"
         message = "single order"
 
-    response = fetch_json(
-        url,
-        method="POST",
-        headers={"Content-Type": "application/json"},
-        data=json.dumps(payload).encode("utf-8"),
-    )
-
-    if response is not None:
+    try:
+        fetch_json(
+            url,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+            data=json.dumps(payload).encode("utf-8"),
+        )
         logging.info(f"Successfully sent {message} to trade-action-service.")
-    else:
+    except Exception:
         logging.error(f"Failed to send {message} to trade-action-service.")
 
 

@@ -50,10 +50,10 @@ class TradeRepository:
             query = query.filter(Trade.symbol == symbol)
 
         if first_only:
-            return query.first()
+            return query.with_for_update().first()
         _page = int(page) if page is not None else 1
         _limit = int(limit) if limit is not None else 50
-        return query.offset((_page - 1) * _limit).limit(_limit).all()
+        return query.with_for_update().offset((_page - 1) * _limit).limit(_limit).all()
 
     def add(self, trade):
         self.db_session.add(trade)
@@ -103,12 +103,12 @@ class MarketDataRepository:
             .first()
         )
 
-    def get_curve(self, asset_class, symbol):
+    def get_curve(self, currency, curve_type):
         return (
             self.db_session.query(MarketDataCurve)
             .filter(
-                MarketDataCurve.asset_class == asset_class,
-                MarketDataCurve.symbol == symbol,
+                MarketDataCurve.currency == currency,
+                MarketDataCurve.curve_type == curve_type,
             )
             .first()
         )

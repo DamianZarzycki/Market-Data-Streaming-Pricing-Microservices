@@ -2,11 +2,16 @@ from datetime import datetime, timezone
 import logging
 import queue
 import threading
-import uuid
 from shared.trading_shared.db import DBSessionManager
-from shared.trading_shared.enums import TradeSide
-from shared.trading_shared.models import Valuation
+from shared.trading_shared.enums import AssetClass, OptionRightType, TradeSide
 from math import erf, sqrt, log
+
+import valuation_service
+from instruments_pricing.irs_pricing_service import price_irs
+from instruments_pricing.option_pricing_service import (
+    calculate_european_call_option_price,
+    calculate_european_put_option_price,
+)
 
 pricing_lock = threading.Lock()
 metrics_queue = queue.Queue()   # consumed by metrics_worker for internal stats
@@ -109,17 +114,38 @@ def _price_trade(tick, trade, asset_type):
     
     elif asset_type == "OPTION":
         spot = tick.get("spot")
-        rate = tick.get("rate")
         volatility = tick.get("volatility")
-        time_to_expiration = tick.get("time_to_expiration")
-        strike = tick.get("strike")
-        option_right_type = tick.get("option_right_type")
-        if spot is None or rate is None or volatility is None or time_to_expiration is None or strike is None or option_right_type is None:
+        params = trade.metadata_payload or {}
+        strike = params.get("strike")
+        maturity_years = params.get("maturity_years")
+        option_right_type = params.get("option_right_type")
+        if (
+            spot is None
+            or volatility is None
+            or strike is None
+            or maturity_years is None
+            or option_right_type is None
+        ):
+            logging.warning(
+                f"Skipping OPTION trade {trade.trade_id}: missing inputs "
+                f"(spot/volatility from tick, strike/maturity/right from metadata)"
+            )
             return
-        current_price = spot * normal_cdf((log(spot / strike) + (rate + 0.5 * volatility ** 2) * time_to_expiration) / (volatility * sqrt(time_to_expiration)))
+        option_details = {
+            "spot": float(spot),
+            "strike": float(strike),
+            "volatility": float(volatility),
+            "maturity_years": float(maturity_years),
+        }
+        if option_right_type == OptionRightType.CALL.value:
+            current_price = calculate_european_call_option_price(option_details)
+        elif option_right_type == OptionRightType.PUT.value:
+            current_price = calculate_european_put_option_price(option_details)
+        else:
+            logging.error(f"Unknown option right type: {option_right_type}")
+            return
         fair_value = round(current_price * quantity, 4)
         market_value = fair_value
-        
 
     current_price = round(current_price, 6)
     unrealized_pnl = calculate_pnl(side, trade_price, current_price, quantity, multiplier)
@@ -142,44 +168,28 @@ def _price_trade(tick, trade, asset_type):
         "valuation_time": valuation_time,
     }
 
+    store_and_publish(trade, valuation_data)
+
+
+def store_and_publish(trade, valuation_data):
+    trade_id = valuation_data["trade_id"]
+
     with pricing_lock:
         valuations_store[trade_id] = valuation_data
 
     logging.info(
-        f"Priced trade {trade_id} ({symbol}, {asset_type}): "
-        f"fair_value={fair_value}, unrealized_pnl={unrealized_pnl}"
+        f"Priced trade {trade_id} ({valuation_data.get('symbol')}, {valuation_data.get('asset_class')}): "
+        f"fair_value={valuation_data.get('fair_value')}, unrealized_pnl={valuation_data.get('unrealized_pnl')}"
     )
-    with DBSessionManager() as db:
-            valuation_time = datetime.now(timezone.utc)
-            try:
-                logging.info(f"market_data_reference={valuation_data['asset_class']}:{valuation_data['symbol']}@{valuation_time}")
-                valuation = Valuation(
-                    valuation_id=uuid.uuid4(),
-                    trade_id=trade.trade_id,
-                    book_id=trade.book_id,
-                    asset_class=valuation_data["asset_class"],
-                    valuation_time=valuation_time,
-                    fair_value=valuation_data["fair_value"],
-                    market_value=valuation_data.get("market_value"),
-                    market_data_reference=f"{valuation_data['asset_class']}:{valuation_data['symbol']}@{valuation_time}",
-                    unrealized_pnl=valuation_data["unrealized_pnl"],
-                    realized_pnl=valuation_data["realized_pnl"],
-                    total_pnl=valuation_data["total_pnl"],
-                    currency=valuation_data["currency"],
-                    valuation_payload=valuation_data,
-                )
-                db.valuations.add(valuation)
-                db.commit()
-            except Exception as e:
-                logging.error(f"Error saving valuation for trade {trade.trade_id}: {e}")
-                db.rollback()
+
+    valuation_service.save_valuation(trade, valuation_data)
 
     metrics_queue.put({
         "type": "PRICING_DONE",
-        "timestamp": valuation_time,
+        "timestamp": valuation_data["valuation_time"],
         "trade_id": trade_id,
         "instrument": trade_id,
-        "value": fair_value,
+        "value": valuation_data.get("fair_value"),
     })
     logging.info(f"Published valuation for trade {trade_id} to metrics queue.")
     with sse_subscribers_lock:
@@ -187,9 +197,102 @@ def _price_trade(tick, trade, asset_type):
             subscriber_queue.put(valuation_data)
 
 
-def recalculate_valuations(tick):
-    """Find all active trades matching the incoming tick and reprice each one."""
+def price_irs_trade(trade, curve):
+    params = trade.metadata_payload or {}
+    required = ("notional", "fixed_rate", "maturity_years", "payments_per_year", "direction")
+    missing = [k for k in required if params.get(k) is None]
+    if missing:
+        logging.warning(
+            f"Skipping IRS trade {trade.trade_id}: missing params {missing} in metadata_payload"
+        )
+        return
+
+    result = price_irs(
+        curve=curve,
+        notional=float(params["notional"]),
+        fixed_rate=float(params["fixed_rate"]),
+        maturity_years=float(params["maturity_years"]),
+        payments_per_year=int(params["payments_per_year"]),
+        direction=params["direction"],
+    )
+
+    pv = round(result["pv"], 4)
+    valuation_data = {
+        "trade_id": str(trade.trade_id),
+        "book_id": str(trade.book_id),
+        "asset_class": AssetClass.IRS.value,
+        "symbol": trade.symbol,
+        "side": trade.side,
+        "fair_value": pv,
+        "market_value": pv,
+        "unrealized_pnl": pv,
+        "realized_pnl": 0.0,
+        "total_pnl": pv,
+        "currency": trade.trade_currency,
+        "valuation_time": current_timestamp(),
+        "pricing_details": {
+            "fixed_leg_pv": round(result["fixed_leg_pv"], 4),
+            "floating_leg_pv": round(result["floating_leg_pv"], 4),
+            "receive_leg_pv": round(result["receive_leg_pv"], 4),
+            "pay_leg_pv": round(result["pay_leg_pv"], 4),
+            "direction": params["direction"],
+            "curve_currency": curve.get("currency"),
+            "tenors": curve.get("tenors"),
+            "rates": curve.get("rates"),
+        },
+    }
+
+    store_and_publish(trade, valuation_data)
+
+
+def update_curve_and_reprice_irs(tick):
     import cache_service
+
+    currency = tick.get("currency")
+    curve_type = tick.get("curve_type")
+    if not currency or not curve_type:
+        logging.warning(f"Ignoring curve tick without curve_id: {tick}")
+        return
+
+    with DBSessionManager() as db:
+        curve_row = db.market_data.get_curve(currency, curve_type)
+
+    if curve_row is None:
+        logging.warning(
+            f"No {currency} {curve_type} curve in MarketDataCurve yet; skipping IRS repricing"
+        )
+        return
+
+    currency = curve_row.currency
+    curve = {
+        "tenors": curve_row.tenors,
+        "rates": curve_row.rates,
+        "currency": currency,
+    }
+
+    with cache_service.cache_lock:
+        irs_trades = [
+            t for t in cache_service.active_trades_cache.values()
+            if t.asset_class == AssetClass.IRS.value and t.trade_currency == currency
+        ]
+
+    logging.info(
+        f"{currency} {curve_type} curve: repricing {len(irs_trades)} IRS trade(s)"
+    )
+    for trade in irs_trades:
+        try:
+            price_irs_trade(trade, curve)
+        except Exception as e:
+            logging.error(f"Error pricing IRS trade {trade.trade_id}: {e}")
+
+
+def recalculate_valuations(tick):
+    """Route an incoming market tick: curve ticks reprice IRS, spot ticks reprice by symbol."""
+    import cache_service
+
+    if tick.get("curve_id"):
+        update_curve_and_reprice_irs(tick)
+        return
 
     asset_type = tick.get("asset_type")
     symbol = tick.get("symbol")

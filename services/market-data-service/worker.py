@@ -1,16 +1,23 @@
 from shared.trading_shared.db import DBSessionManager
-from shared.trading_shared.enums import CurveType
-from shared.trading_shared.models import MarketDataCurve, MarketDataSpotPrice
-from shared.trading_shared.enums import AssetClass, EventType, ServiceStatus, OptionRightType, OptionType
+from shared.trading_shared.enums import (
+    AssetClass,
+    CurveType,
+    EventType,
+    IRSDirection,
+    ServiceStatus,
+    SnapshotType,
+)
+from shared.trading_shared.models import MarketDataCurve, MarketDataSnapshot, MarketDataSpotPrice
 from shared.trading_shared.audit import AuditLogger
 
 import json
 import logging
 import os
 import queue
-import random
 import threading
 import time
+import uuid
+import random
 from datetime import datetime, timezone
 
 from market_data_simulator import MarketDataSimulator
@@ -32,6 +39,7 @@ health_stats = {
     "last_event_time": None,
 }
 batch_size = 30
+
 market_simulator = MarketDataSimulator()
 
 
@@ -60,45 +68,49 @@ def metric_worker():
 
         except Exception as e:
             logging.error(f"Error occurred while processing metric: {e}")
-        finally:
-            pass
 
 
 def current_timestamp():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
-def random_yield():
-    return round(random.uniform(0.03, 0.06), 4)
-
-
 def generate_market_tick():
+    """Generuje wyłącznie dane rynkowe (spot + krzywe). Bez parametrów transakcji."""
     global global_event_id
 
     current_tmsp = current_timestamp()
-    global_event_id += 5
+    global_event_id += 6
 
     eq_tick = market_simulator.generate_equity_tick()
     bond_yield = market_simulator.generate_bond_tick()
     fx_spot = market_simulator.generate_fx_tick()
-
     usd_rates = market_simulator.generate_usd_curve_tick()
     eur_rates = market_simulator.generate_eur_curve_tick()
-
     option_details = market_simulator.generate_option_details()
+    irs_details = market_simulator.generate_irs_details()
 
     market_tick_data = {
         "ACME_OPT": {
-            "event_id": global_event_id - 5,
+            "event_id": global_event_id - 6,
             "asset_type": AssetClass.OPTION.value,
             "timestamp": current_tmsp,
-            "type": OptionType.EUROPEAN.value,
             "symbol": "ACME",
             "spot": option_details["spot"],
             "strike": option_details["strike"],
             "option_right_type": option_details["option_right_type"],
             "maturity_years": option_details["maturity_years"],
-            "quantity": 100
+            "volatility": option_details["volatility"],
+        },
+        "IRS": {
+            "event_id": global_event_id - 5,
+            "asset_type": AssetClass.IRS.value,
+            "timestamp": current_tmsp,
+            "currency": irs_details["currency"],
+            "notional": irs_details["notional"],
+            "fixed_rate": irs_details["fixed_rate"],
+            "maturity_years": irs_details["maturity_years"],
+            "payments_per_year": irs_details["payments_per_year"],
+            "direction": irs_details["direction"],
         },
         # "ACME": {
         #     "event_id": global_event_id - 4,
@@ -122,35 +134,32 @@ def generate_market_tick():
         #     "symbol": "EURUSD",
         #     "timestamp": current_tmsp,
         #     "spot": fx_spot,
-        #     # "domestic_rate": 0.045,
-        #     # "foreign_rate": 0.032,
-        #     # "tenor_years": 1,
-        #     # DO PRICING SERVICE
         # },
-        # "USD_YIELD_CURVE": {
-        #     "event_id": global_event_id - 1,
-        #     "symbol": "USD_YIELD_CURVE",
-        #     "curve_name": "YIELD_CURVE",
-        #     "curve_type": CurveType.YIELD_CURVE.value,
-        #     "currency": "USD",
-        #     "tenors": ["1M", "3M", "1Y", "5Y"],
-        #     "rates": usd_rates,
-        #     "timestamp": current_tmsp,
-        # },
-        # "EUR_YIELD_CURVE": {
-        #     "event_id": global_event_id,
-        #     "symbol": "EUR_YIELD_CURVE",
-        #     "curve_name": "YIELD_CURVE",
-        #     "curve_type": CurveType.YIELD_CURVE.value,
-        #     "currency": "EUR",
-        #     "tenors": ["1M", "3M", "1Y", "5Y"],
-        #     "rates": eur_rates,
-        #     "timestamp": current_tmsp,
-        # },
+        "USD_YIELD_CURVE": {
+            "event_id": global_event_id - 1,
+            "curve_id": str(uuid.uuid4()),
+            "symbol": "USD_YIELD_CURVE",
+            "curve_name": "USD_YIELD_CURVE",
+            "curve_type": CurveType.YIELD_CURVE.value,
+            "currency": "USD",
+            "tenors": ["1M", "3M", "1Y", "5Y"],
+            "rates": usd_rates,
+            "timestamp": current_tmsp,
+        },
+        "EUR_YIELD_CURVE": {
+            "event_id": global_event_id,
+            "curve_id": str(uuid.uuid4()),
+            "symbol": "EUR_YIELD_CURVE",
+            "curve_name": "EUR_YIELD_CURVE",
+            "curve_type": CurveType.YIELD_CURVE.value,
+            "currency": "EUR",
+            "tenors": ["1M", "3M", "1Y", "5Y"],
+            "rates": eur_rates,
+            "timestamp": current_tmsp,
+        },
     }
 
     metrics_queue.put({"type": "EVENT_GENERATED", "timestamp": current_tmsp})
-
     return market_tick_data
 
 
@@ -161,7 +170,6 @@ def update_snapshot(market_tick_data):
         market_tick_data_state = market_tick_data
         stats["generated_events"] += len(market_tick_data)
         stats["last_event_time"] = current_timestamp()
-
         logging.info(
             f"Generated {len(market_tick_data)} market ticks. Total events: {stats['generated_events']}"
         )
@@ -176,7 +184,75 @@ def publish_tick_to_stream(market_tick_data):
                 subscriber_queue.put(msg)
 
 
+def persist_curves(market_tick_data):
+    """Zapisuje krzywe synchronicznie przed publish — pricing może od razu zrobić get_curve(curve_id)."""
+    curve_records = []
+    for _, data in market_tick_data.items():
+        if "curve_type" not in data:
+            continue
+        curve_records.append(
+            MarketDataCurve(
+                curve_id=data.get("curve_id"),
+                event_id=data.get("event_id"),
+                curve_name=data.get("curve_name"),
+                curve_type=data.get("curve_type"),
+                currency=data.get("currency"),
+                tenors=data.get("tenors"),
+                rates=data.get("rates"),
+                event_time=datetime.now(timezone.utc),
+                raw_payload=data,
+            )
+        )
+
+    if not curve_records:
+        return
+
+    try:
+        with DBSessionManager() as db:
+            db.market_data.add_all(curve_records)
+            db.commit()
+        logging.info(
+            f"Flushed {len(curve_records)} curve(s) to MarketDataCurve before stream publish"
+        )
+    except Exception as e:
+        logging.error(f"Failed to flush curves before publish: {e}")
+        audit_logger.error(
+            EventType.DB_ERROR,
+            f"Failed to flush curves before publish: {e}",
+            payload={"error": str(e), "curve_count": len(curve_records)},
+        )
+
+
+def persist_full_snapshot(market_tick_data):
+    """Okresowy FULL snapshot lokalnego stanu rynku → MarketDataSnapshots."""
+    snapshot = MarketDataSnapshot(
+        event_id=global_event_id,
+        snapshot_type=SnapshotType.FULL.value,
+        snapshot_time=datetime.now(timezone.utc),
+        payload=market_tick_data,
+    )
+    try:
+        with DBSessionManager() as db:
+            db.session.add(snapshot)
+            db.commit()
+        logging.info(f"Saved FULL market data snapshot (event_id={global_event_id})")
+        audit_logger.info(
+            EventType.SNAPSHOT_GENERATED,
+            "FULL market data snapshot persisted",
+            payload={"event_id": global_event_id, "instruments": list(market_tick_data.keys())},
+        )
+    except Exception as e:
+        logging.error(f"Failed to persist market data snapshot: {e}")
+        audit_logger.error(
+            EventType.DB_ERROR,
+            f"Failed to persist market data snapshot: {e}",
+            payload={"error": str(e)},
+        )
+
+
 def market_worker():
+    global _ticks_since_snapshot
+
     interval_ms_str = os.getenv("TICK_INTERVAL_MS", "100")
     interval_ms = int(interval_ms_str)
     sleep_seconds = interval_ms / 1000.0
@@ -194,7 +270,9 @@ def symbols():
         try:
             data = db.session.query(MarketDataSpotPrice).all()
             grouped_symbols = {}
-            logging.info(f"Fetchedddd {len(data)} market data records from DB for symbol extraction")
+            logging.info(
+                f"Fetched {len(data)} market data records from DB for symbol extraction"
+            )
             for item in data:
                 if item.asset_class:
                     if item.asset_class not in grouped_symbols:
@@ -209,6 +287,7 @@ def symbols():
 
 
 def db_worker():
+    """Batchuje tylko spoty. Krzywe są flushowane synchronicznie w persist_curves."""
     buffer = []
     logging.info("DB worker started")
     while True:
@@ -217,46 +296,39 @@ def db_worker():
             try:
                 for _, data in new_ticks.items():
                     if "curve_type" in data:
-                        logging.info(f"Processing market data for DB: {data}")
-                        curve_record = MarketDataCurve(
-                            event_id=data.get("event_id"),
-                            curve_name=data.get("curve_name"),  # np. "USD_YIELD_CURVE"
-                            curve_type=data.get("curve_type"),  # np. "YIELD_CURVE"
-                            currency=data.get("currency"),  # np. "USD"
-                            tenors=data.get("tenors"),  # np. ["1M", "3M", "1Y", "5Y"]
-                            rates=data.get("rates"),  # np. [0.0412, 0.0415, 0.0421, 0.0450]
-                            event_time=datetime.now(timezone.utc),  # czas wystąpienia ticku
-                            raw_payload=data,  # cały wygenerowany słownik dla pewności audytowej
-                        )
-                        buffer.append(curve_record)
-                    else:
-                        record = MarketDataSpotPrice(
-                            event_id=data.get("event_id"),
-                            symbol=data["symbol"],
-                            asset_class=data["asset_type"],
-                            source="GENERATED",
-                            event_time=datetime.now(timezone.utc),
-                            raw_payload=data,
-                        )
+                        continue
 
-                        if data["asset_type"] == AssetClass.EQUITY.value:
-                            record.bid = data.get("bid")
-                            record.ask = data.get("ask")
-                            record.last = data.get("last")
-                        elif data["asset_type"] == AssetClass.FX.value:
-                            record.spot = data.get("spot")
-                        elif data["asset_type"] == AssetClass.BOND.value:
-                            record.last = data.get("yield")
+                    record = MarketDataSpotPrice(
+                        event_id=data.get("event_id"),
+                        symbol=data["symbol"],
+                        asset_class=data["asset_type"],
+                        source="GENERATED",
+                        event_time=datetime.now(timezone.utc),
+                        raw_payload=data,
+                    )
 
-                        buffer.append(record)
+                    asset_type = data["asset_type"]
+                    if asset_type == AssetClass.EQUITY.value:
+                        record.bid = data.get("bid")
+                        record.ask = data.get("ask")
+                        record.last = data.get("last")
+                    elif asset_type == AssetClass.FX.value:
+                        record.spot = data.get("spot")
+                    elif asset_type == AssetClass.BOND.value:
+                        record.last = data.get("yield")
+                    elif asset_type == AssetClass.OPTION.value:
+                        record.spot = data.get("spot")
+                        # volatility siedzi w raw_payload; kolumna spot/last nie ma pola vol
 
-                if len(buffer) >= batch_size or db_queue.empty() and len(buffer) > 0:
+                    buffer.append(record)
+
+                if len(buffer) >= batch_size or (db_queue.empty() and len(buffer) > 0):
                     try:
                         batch_count = len(buffer)
                         with DBSessionManager() as db:
                             db.market_data.add_all(buffer)
                             db.commit()
-                        logging.info(f"Saved {batch_count} market data records to DB")
+                        logging.info(f"Saved {batch_count} spot market data records to DB")
                         buffer.clear()
                         audit_logger.info(
                             EventType.DB_CREATE,

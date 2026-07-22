@@ -33,6 +33,7 @@ class Instrument(Base):
 
     instrument_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     symbol = Column(Text, nullable=False)
+    synthetic = Column(Boolean, nullable=True, default=False)
     asset_class = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
     multiplier = Column(Numeric, nullable=False, default=1)

@@ -4,10 +4,8 @@ import uuid
 import logging
 from shared.trading_shared.audit import AuditLogger
 from shared.trading_shared.db import DBSessionManager
-from shared.trading_shared.enums import ActionType, AssetClass, EntityType, EventType, OptionRightType, Severity
+from shared.trading_shared.enums import ActionType, AssetClass, EntityType, EventType, OptionRightType, Severity, TradeSide
 from shared.trading_shared.models import Instrument, Trade, Valuation
-
-from option_pricing_service import calculate_european_call_option_price, calculate_european_put_option_price
 
 trade_queue = queue.Queue()
 audit_logger = AuditLogger("trade-action-service")
@@ -38,6 +36,7 @@ def trade_action_handler(data):
                 correlation_id=client_request_id,
                 payload={"action_type": action_type, "client_request_id": client_request_id},
             )
+            metadata_payload = None
             if action_type == ActionType.OPEN_TRADE.value:
                 # IDEMPOTENCY check
                 if client_request_id:
@@ -72,16 +71,35 @@ def trade_action_handler(data):
 
                 if asset_class == AssetClass.OPTION.value:
                     logging.info(f"OPTION: {data}.")
-                    
+
                     option_right_type = data.get("option_right_type")
+                    option_type = data.get("option_type")
                     option_details = {
                         "spot": data.get("spot"),
                         "strike": data.get("strike"),
                         "volatility": data.get("volatility"),
                         "maturity_years": data.get("maturity_years"),
+                        "option_right_type": option_right_type,
+                        "option_type": option_type,
+                        "option_price": data.get("option_price"),
                     }
-                    option_price = calculate_european_call_option_price(option_details) if option_right_type == OptionRightType.CALL.value else calculate_european_put_option_price(option_details)
-                    trade_price = option_price
+
+                    metadata_payload = option_details
+                    trade_price = data.get("option_price")
+                elif asset_class == AssetClass.IRS.value:
+                    logging.info(f"IRS: {data}.")
+
+                    # IRS jest wyceniany krzywą stóp — parametry kontraktu trzymamy
+                    # w metadata_payload, a nie jako spot/price danych rynkowych.
+                    metadata_payload = {
+                        "notional": data.get("notional"),
+                        "fixed_rate": data.get("fixed_rate"),
+                        "maturity_years": data.get("maturity_years"),
+                        "payments_per_year": data.get("payments_per_year", 1),
+                        "direction": data.get("direction"),
+                    }
+                    # IRS wchodzi na rynek z PV ~ 0.
+                    trade_price = data.get("trade_price")
                 else:
                     trade_price = data.get("trade_price")
 
@@ -98,6 +116,7 @@ def trade_action_handler(data):
                     trade_date=datetime.now(timezone.utc),
                     status="ACTIVE",
                     source="GENERATED",
+                    metadata_payload=metadata_payload if metadata_payload else None,
                 )
                 logging.info(f"Creating new trade: {new_trade}")
                 db.trades.add(new_trade)
@@ -109,16 +128,8 @@ def trade_action_handler(data):
 
                 # IDEMPOTENCY check
                 if client_request_id:
-                    duplicate = (
-                        db.query(Trade)
-                        .filter(
-                            Trade.trade_id == trade_id_to_close,
-                            Trade.metadata_payload["close_client_request_id"].as_string()
-                            == client_request_id,
-                        )
-                        .first()
-                    )
-                    if duplicate:
+                    trade = db.trades.get_by_id(trade_id_to_close)
+                    if trade and trade.metadata_payload["close_client_request_id"].as_string() == client_request_id:
                         logging.warning(
                             f"Duplicate CLOSE_TRADE ignored: client_request_id {client_request_id} "
                             f"already closed trade {trade_id_to_close}"
@@ -126,11 +137,6 @@ def trade_action_handler(data):
                         audit_logger.warning(
                             EventType.DB_REJECT,
                             f"Duplicate CLOSE_TRADE ignored for client_request_id {client_request_id}",
-                            entity_type=EntityType.TRADE.value,
-                            entity_id=str(trade_id_to_close),
-                            correlation_id=client_request_id,
-                        )
-                        return
 
                 audit_logger.info(
                         EventType.DB_CLOSE,
@@ -140,7 +146,7 @@ def trade_action_handler(data):
                         correlation_id=client_request_id,
                 )
                 trade_to_close = (
-                    db.query(Trade)
+                    db.trades.get_trades(trade_id=trade_id_to_close, first_only=True)
                     .filter_by(trade_id=trade_id_to_close)
                     # Preventing race conditions by locking
                     # the selected trade row until the transaction is complete

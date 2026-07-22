@@ -62,6 +62,10 @@ class AssetClass(str, Enum):
     FUTURES = "FUTURES"
     COMMODITY = "COMMODITY"
 
+class IRSDirection(str, Enum):
+    PAY_FIXED_RECEIVE_FLOAT = "PAY_FIXED_RECEIVE_FLOAT"
+    RECEIVE_FIXED_PAY_FLOAT = "RECEIVE_FIXED_PAY_FLOAT"
+
 class OptionType(str, Enum):
     EUROPEAN = "EUROPEAN"
 

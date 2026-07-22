@@ -2,6 +2,7 @@ import time
 import logging
 from datetime import datetime, timezone
 from urllib import request
+from shared.trading_shared.decorators import log_and_time
 from shared.trading_shared.enums import ServiceStatus
 
 health_cache = {}
