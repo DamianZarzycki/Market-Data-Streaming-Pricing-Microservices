@@ -19,6 +19,13 @@ class MarketDataSimulator:
         self.__option_volatility = 0.35
         self.__option_spot = 100.0
 
+        # Synthetic benchmark index (MARKET_INDEX). Behaves like a broad equity
+        # index: starts at 1000 and follows a random walk with a small upward
+        # drift so it has a non-zero mean return to make alpha/beta meaningful.
+        self.__benchmark_level = 1000.0
+        self.__benchmark_drift = 0.0002
+        self.__benchmark_volatility = 0.004
+
     def generate_equity_tick(self):
         price_movement = random.normalvariate(0, self.__acme_volatility)
         self.__acme_price += price_movement
@@ -67,6 +74,13 @@ class MarketDataSimulator:
             "maturity_years": round(random.uniform(0.1, 0.5), 2),
             "volatility": round(self.__option_volatility, 4),
         }
+
+    def generate_benchmark_tick(self) -> float:
+        """Synthetic reference index level (MARKET_INDEX) as a drifting random walk."""
+        pct_move = self.__benchmark_drift + random.normalvariate(0, self.__benchmark_volatility)
+        self.__benchmark_level *= (1 + pct_move)
+        self.__benchmark_level = max(0.01, self.__benchmark_level)
+        return round(self.__benchmark_level, 4)
 
     def generate_irs_details(self) -> dict:
         self.__irs_currency = random.choice(["USD", "EUR"])

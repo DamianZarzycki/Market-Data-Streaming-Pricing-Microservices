@@ -1,11 +1,12 @@
-from datetime import datetime, timezone
 import logging
 
 from shared.trading_shared.audit import AuditLogger
-from shared.trading_shared.enums import EntityType, EventType
-from shared.trading_shared.models import Book
+from shared.trading_shared.enums import EntityType, EventType, TradeStatus
+from shared.trading_shared.models import Book, Trade
 
 audit_logger = AuditLogger("books-manager-service")
+
+
 def get_all_books(db, is_active=True):
     logging.info(f"Fetching all books with is_active={is_active}")
     books = db.query(Book).filter(Book.is_active == is_active).all()
@@ -19,7 +20,7 @@ def get_all_books(db, is_active=True):
         }
         for b in books
     ]
-    logging.info(f"Found {len(res)} books with is_active={res}")
+    logging.info(f"Found {len(res)} books with is_active={is_active}")
 
     return res
 
@@ -101,11 +102,12 @@ def update_book(db, book_id, data, updated_by=None):
     if "description" in data:
         book.description = data["description"]
 
+    if "expected_asset_class" in data and data["expected_asset_class"]:
+        book.expected_asset_class = data["expected_asset_class"]
+
     if "is_active" in data:
         book.is_active = data["is_active"]
 
-    if updated_by:
-        book.updated_by = updated_by
     if updated_by is not None:
         book.updated_by = updated_by
 
@@ -120,10 +122,27 @@ def update_book(db, book_id, data, updated_by=None):
     return book
 
 
+def count_active_trades(db, book_id) -> int:
+    return (
+        db.query(Trade)
+        .filter(
+            Trade.book_id == book_id,
+            Trade.status == TradeStatus.ACTIVE.value,
+        )
+        .count()
+    )
+
+
 def delete_book(db, book_id):
     book = db.query(Book).filter(Book.book_id == book_id).first()
     if not book:
-        return {"error": "Book not found"}
+        return None
+
+    active_trades = count_active_trades(db, book_id)
+    if active_trades > 0:
+        raise ValueError(
+            f"Cannot delete book while {active_trades} active trade(s) remain"
+        )
 
     book.is_active = False
     db.commit()

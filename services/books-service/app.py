@@ -77,7 +77,15 @@ def update_book(book_id):
         response.status = 400
         return {"error": "Invalid JSON payload"}
 
-    book = books_manager_service.update_book(db, book_id, payload, updated_by="API")
+    try:
+        book = books_manager_service.update_book(
+            db, book_id, payload, updated_by="API"
+        )
+    except ValueError as ve:
+        db.rollback()
+        response.status = 409
+        return {"error": str(ve)}
+
     if not book:
         response.status = 404
         return {"error": "Book not found"}
@@ -87,8 +95,18 @@ def update_book(book_id):
 
 @app.route("/books/<book_id>", method=["DELETE"])
 def delete_book(book_id):
-    books_manager_service.delete_book(db, book_id)
-    return {"message": f"Book with id {book_id} marked as inactive"}
+    try:
+        result = books_manager_service.delete_book(db, book_id)
+    except ValueError as ve:
+        db.rollback()
+        response.status = 409
+        return {"error": str(ve)}
+
+    if not result:
+        response.status = 404
+        return {"error": "Book not found"}
+
+    return result
 
 
 if __name__ == "__main__":

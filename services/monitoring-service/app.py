@@ -23,7 +23,8 @@ def health():
 
 @app.route("/status")
 def status():
-    return worker.health_cache.copy()
+    # Envelope: services + environment + kpis (FE accepts flat map or wrapper).
+    return dict(worker.status_payload)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ from shared.trading_shared.enums import EventType
 from shared.trading_shared.logging_config import configure_logging
 import worker
 import calculation_service
+import book_metrics_service
 
 configure_logging("pricing-service")
 app = Bottle()
@@ -25,6 +26,8 @@ def health():
             "received_events": worker.events_counter,
             "last_market_event_time": worker.last_market_event_time,
             "last_pricing_time": worker.last_pricing_time,
+            "last_valuation_symbol": worker.last_valuation_symbol,
+            "last_valuation_asset_class": worker.last_valuation_asset_class,
         }
 
 
@@ -46,6 +49,24 @@ def valuations_by_trade_id(trade_id):
         return HTTPResponse(
             status=404, body=error_body, headers={"Content-Type": "application/json"}
         )
+
+
+@app.route("/book-metrics")
+def book_metrics():
+    """Return the latest alpha/beta metrics for every book."""
+    return {"benchmark": "MARKET_INDEX", "books": book_metrics_service.get_all_metrics()}
+
+
+@app.route("/book-metrics/<book_id>")
+def book_metrics_by_id(book_id):
+    metrics = book_metrics_service.get_metrics_for_book(book_id)
+    if metrics is not None:
+        return metrics
+
+    error_body = json.dumps({"error": "No metrics available for book_id: " + book_id})
+    return HTTPResponse(
+        status=404, body=error_body, headers={"Content-Type": "application/json"}
+    )
 
 
 @app.route("/valuation-stream")

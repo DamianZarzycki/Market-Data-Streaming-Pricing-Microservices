@@ -15,6 +15,8 @@ connection_status = ConnectionStatus.DISCONNECTED.value
 events_counter = 0
 last_market_event_time = None
 last_pricing_time = None
+last_valuation_symbol = None
+last_valuation_asset_class = None
 
 
 
@@ -84,6 +86,7 @@ def pricing_worker():
 
 def metrics_worker():
     global last_pricing_time, events_counter, last_market_event_time
+    global last_valuation_symbol, last_valuation_asset_class
 
     while True:
         try:
@@ -104,6 +107,10 @@ def metrics_worker():
 
                 with stats_lock:
                     last_pricing_time = message["timestamp"]
+                    last_valuation_symbol = message.get("symbol") or last_valuation_symbol
+                    last_valuation_asset_class = (
+                        message.get("asset_class") or last_valuation_asset_class
+                    )
 
             calculation_service.metrics_queue.task_done()
 

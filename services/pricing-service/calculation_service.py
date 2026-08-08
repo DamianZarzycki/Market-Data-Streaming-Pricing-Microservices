@@ -189,6 +189,8 @@ def store_and_publish(trade, valuation_data):
         "timestamp": valuation_data["valuation_time"],
         "trade_id": trade_id,
         "instrument": trade_id,
+        "symbol": valuation_data.get("symbol"),
+        "asset_class": valuation_data.get("asset_class"),
         "value": valuation_data.get("fair_value"),
     })
     logging.info(f"Published valuation for trade {trade_id} to metrics queue.")
@@ -289,6 +291,7 @@ def update_curve_and_reprice_irs(tick):
 def recalculate_valuations(tick):
     """Route an incoming market tick: curve ticks reprice IRS, spot ticks reprice by symbol."""
     import cache_service
+    import book_metrics_service
 
     if tick.get("curve_id"):
         update_curve_and_reprice_irs(tick)
@@ -298,6 +301,12 @@ def recalculate_valuations(tick):
     symbol = tick.get("symbol")
 
     if not asset_type or not symbol:
+        return
+
+    # The benchmark index is not a tradable instrument: it only drives the
+    # book-level alpha/beta computation, acting as the sampling clock.
+    if asset_type == AssetClass.BENCHMARK.value:
+        book_metrics_service.on_benchmark_tick(tick)
         return
 
     with cache_service.cache_lock:

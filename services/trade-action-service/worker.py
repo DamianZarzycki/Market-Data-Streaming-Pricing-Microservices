@@ -2,33 +2,36 @@ from datetime import datetime, timezone
 import queue
 import uuid
 import logging
+import metrics
 from shared.trading_shared.audit import AuditLogger
 from shared.trading_shared.db import DBSessionManager
-from shared.trading_shared.enums import ActionType, AssetClass, EntityType, EventType, OptionRightType, Severity, TradeSide
+from shared.trading_shared.enums import ActionType, AssetClass, EntityType, EventType, TradeSide
 from shared.trading_shared.models import Instrument, Trade, Valuation
 
-trade_queue = queue.Queue()
+trade_queue = queue.Queue(maxsize=metrics.QUEUE_MAXSIZE)
 audit_logger = AuditLogger("trade-action-service")
 
 
 def trade_action_worker():
+    metrics.set_worker_running(True)
     while True:
         try:
             payload = trade_queue.get()
-            logging.info(
-                f"payload:::: {payload}",
-            )
+            logging.info(f"payload:::: {payload}")
             trade_action_handler(payload)
         except Exception as e:
             logging.error(f"Error: {e}")
 
 
 def trade_action_handler(data):
+    enqueued_at = data.get("_enqueued_at")
+    action_type = data.get("action_type")
+    client_request_id = data.get("client_request_id")
+    symbol = data.get("symbol")
+
     with DBSessionManager() as db:
         try:
             logging.info(f"Received data from queue: {data}")
-            action_type = data.get("action_type")
-            client_request_id = data.get("client_request_id")
             audit_logger.info(
                 EventType.DB_CREATE,
                 f"Processing trade action: {action_type} for client_request_id: {client_request_id}",
@@ -53,6 +56,9 @@ def trade_action_handler(data):
                             f"Duplicate OPEN_TRADE ignored for client_request_id {client_request_id}",
                             entity_type=EntityType.TRADE.value,
                             correlation_id=client_request_id,
+                        )
+                        metrics.record_duplicate(
+                            action_type, client_request_id, symbol, enqueued_at
                         )
                         return
 
@@ -86,6 +92,7 @@ def trade_action_handler(data):
 
                     metadata_payload = option_details
                     trade_price = data.get("option_price")
+                    process_note = "option opened"
                 elif asset_class == AssetClass.IRS.value:
                     logging.info(f"IRS: {data}.")
 
@@ -100,8 +107,10 @@ def trade_action_handler(data):
                     }
                     # IRS wchodzi na rynek z PV ~ 0.
                     trade_price = data.get("trade_price")
+                    process_note = "IRS metadata"
                 else:
                     trade_price = data.get("trade_price")
+                    process_note = "trade created"
 
                 new_trade = Trade(
                     client_request_id=client_request_id,
@@ -129,7 +138,12 @@ def trade_action_handler(data):
                 # IDEMPOTENCY check
                 if client_request_id:
                     trade = db.trades.get_by_id(trade_id_to_close)
-                    if trade and trade.metadata_payload["close_client_request_id"].as_string() == client_request_id:
+                    close_req = None
+                    if trade and trade.metadata_payload:
+                        close_req = trade.metadata_payload.get("close_client_request_id")
+                        if hasattr(close_req, "as_string"):
+                            close_req = close_req.as_string()
+                    if trade and close_req == client_request_id:
                         logging.warning(
                             f"Duplicate CLOSE_TRADE ignored: client_request_id {client_request_id} "
                             f"already closed trade {trade_id_to_close}"
@@ -137,19 +151,26 @@ def trade_action_handler(data):
                         audit_logger.warning(
                             EventType.DB_REJECT,
                             f"Duplicate CLOSE_TRADE ignored for client_request_id {client_request_id}",
+                            entity_type=EntityType.TRADE.value,
+                            correlation_id=client_request_id,
+                        )
+                        metrics.record_duplicate(
+                            action_type, client_request_id, symbol, enqueued_at
+                        )
+                        return
 
                 audit_logger.info(
-                        EventType.DB_CLOSE,
-                        f"Closing trade: {trade_id_to_close}",
-                        entity_type=EntityType.TRADE.value,
-                        entity_id=str(trade_id_to_close),
-                        correlation_id=client_request_id,
+                    EventType.DB_CLOSE,
+                    f"Closing trade: {trade_id_to_close}",
+                    entity_type=EntityType.TRADE.value,
+                    entity_id=str(trade_id_to_close),
+                    correlation_id=client_request_id,
                 )
+                # Preventing race conditions by locking the selected trade row
+                # until the transaction is complete.
                 trade_to_close = (
-                    db.trades.get_trades(trade_id=trade_id_to_close, first_only=True)
+                    db.session.query(Trade)
                     .filter_by(trade_id=trade_id_to_close)
-                    # Preventing race conditions by locking
-                    # the selected trade row until the transaction is complete
                     .with_for_update()
                     .first()
                 )
@@ -163,6 +184,13 @@ def trade_action_handler(data):
                         entity_id=str(trade_id_to_close),
                         correlation_id=client_request_id,
                     )
+                    metrics.record_error(
+                        action_type,
+                        client_request_id,
+                        symbol,
+                        "trade not found",
+                        enqueued_at,
+                    )
                     return
 
                 if trade_to_close.status != "ACTIVE":
@@ -174,8 +202,16 @@ def trade_action_handler(data):
                         entity_id=str(trade_id_to_close),
                         correlation_id=client_request_id,
                     )
+                    metrics.record_error(
+                        action_type,
+                        client_request_id,
+                        trade_to_close.symbol or symbol,
+                        "trade not ACTIVE",
+                        enqueued_at,
+                    )
                     return
 
+                symbol = trade_to_close.symbol or symbol
                 trade_to_close.status = "CLOSED"
                 trade_to_close.close_price = data.get("close_price")
                 trade_to_close.close_reason = data.get("close_reason")
@@ -185,7 +221,7 @@ def trade_action_handler(data):
                 trade_price = float(trade_to_close.trade_price)
                 quantity = float(trade_to_close.quantity)
 
-                if trade_to_close.side == "BUY":
+                if trade_to_close.side == TradeSide.BUY.value or trade_to_close.side == "BUY":
                     realized_pnl = round((close_price - trade_price) * quantity, 4)
                 else:
                     realized_pnl = round((trade_price - close_price) * quantity, 4)
@@ -214,6 +250,17 @@ def trade_action_handler(data):
                 db.valuations.add(closing_valuation)
                 # TODO Cache clearing clear cache of trade for trade close
                 logging.info(f"Successfully closed trade: {trade_id_to_close}")
+                process_note = "realized PnL written"
+
+            else:
+                metrics.record_error(
+                    action_type,
+                    client_request_id,
+                    symbol,
+                    f"unsupported action_type: {action_type}",
+                    enqueued_at,
+                )
+                return
 
             db.commit()
 
@@ -236,6 +283,10 @@ def trade_action_handler(data):
                     payload={"close_price": data.get("close_price"), "realized_pnl": realized_pnl},
                 )
 
+            metrics.record_processed(
+                action_type, client_request_id, symbol, process_note, enqueued_at
+            )
+
         except Exception as e:
             db.rollback()
             logging.error(f"WENT WRONG: {e}")
@@ -244,6 +295,13 @@ def trade_action_handler(data):
                 f"Trade action failed: {e}",
                 correlation_id=data.get("client_request_id"),
                 payload={"action_type": data.get("action_type"), "error": str(e)},
+            )
+            metrics.record_error(
+                action_type,
+                client_request_id,
+                symbol,
+                str(e)[:120],
+                enqueued_at,
             )
 
         finally:

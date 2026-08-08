@@ -1,8 +1,10 @@
 import logging
 import queue as queue_module
+import time
 
 from shared.trading_shared.audit import AuditLogger
 from shared.trading_shared.enums import ActionType, EventType, ServiceStatus
+import metrics
 import worker
 
 VALID_ACTION_TYPES = {ActionType.OPEN_TRADE.value, ActionType.CLOSE_TRADE.value}
@@ -14,6 +16,10 @@ def get_health():
         "service": "trade-action-service",
         "status": ServiceStatus.UP.value,
     }
+
+
+def get_status():
+    return metrics.build_status(worker.trade_queue)
 
 
 def validate_trade_action(item):
@@ -32,13 +38,24 @@ def submit_trade_action(data):
         audit_logger.warning(
             EventType.DB_REJECT,
             f"Trade action rejected: {error}",
-            payload={"action_type": data.get("action_type"), "client_request_id": data.get("client_request_id")},
+            payload={
+                "action_type": data.get("action_type"),
+                "client_request_id": data.get("client_request_id"),
+            },
+        )
+        metrics.record_rejected(
+            data.get("action_type"),
+            data.get("client_request_id"),
+            data.get("symbol"),
+            error,
         )
         return {"error": error}, 400
 
     client_request_id = data["client_request_id"]
+    payload = dict(data)
+    payload["_enqueued_at"] = time.time()
     try:
-        worker.trade_queue.put(data, block=False)
+        worker.trade_queue.put(payload, block=False)
         logging.info(f"Enqueued request {client_request_id}.")
     except queue_module.Full:
         logging.error(f"Queue full. Rejected request: {client_request_id}")
@@ -47,8 +64,18 @@ def submit_trade_action(data):
             f"Trade action queue full. Rejected: {client_request_id}",
             correlation_id=client_request_id,
         )
+        metrics.record_overload(
+            data.get("action_type"),
+            client_request_id,
+            data.get("symbol"),
+        )
         return {"error": "System overloaded, please try again later"}, 503
 
+    metrics.record_accepted(
+        data.get("action_type"),
+        client_request_id,
+        data.get("symbol"),
+    )
     return {
         "message": "Trade action accepted for processing",
         "client_request_id": client_request_id,
@@ -63,17 +90,35 @@ def submit_trade_action_batch(items):
         error = validate_trade_action(item)
         if error:
             errors.append(f"Item {index}: {error}")
+            metrics.record_rejected(
+                item.get("action_type"),
+                item.get("client_request_id"),
+                item.get("symbol"),
+                error,
+            )
             continue
 
+        payload = dict(item)
+        payload["_enqueued_at"] = time.time()
         try:
-            worker.trade_queue.put(item, block=False)
+            worker.trade_queue.put(payload, block=False)
             accepted_count += 1
+            metrics.record_accepted(
+                item.get("action_type"),
+                item.get("client_request_id"),
+                item.get("symbol"),
+            )
         except queue_module.Full:
             logging.error("Queue full during batch processing.")
             audit_logger.error(
                 EventType.DB_ERROR,
                 "Trade action queue full during batch processing",
                 correlation_id=item.get("client_request_id"),
+            )
+            metrics.record_overload(
+                item.get("action_type"),
+                item.get("client_request_id"),
+                item.get("symbol"),
             )
             return {
                 "error": "System overloaded, queue is full",

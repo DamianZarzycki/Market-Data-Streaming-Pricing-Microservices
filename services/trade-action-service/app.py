@@ -17,6 +17,11 @@ def health():
     return trade_action_service.get_health()
 
 
+@app.route("/status", method=["GET"])
+def status():
+    return trade_action_service.get_status()
+
+
 @app.route("/trade-actions", method=["POST"])
 def trade_actions():
     logging.info("New /trade-actions request received")

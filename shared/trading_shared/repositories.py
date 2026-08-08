@@ -50,10 +50,17 @@ class TradeRepository:
             query = query.filter(Trade.symbol == symbol)
 
         if first_only:
+            # Row lock only when a single trade is fetched for mutation.
             return query.with_for_update().first()
         _page = int(page) if page is not None else 1
         _limit = int(limit) if limit is not None else 50
-        return query.with_for_update().offset((_page - 1) * _limit).limit(_limit).all()
+        # Read-only listing must not take FOR UPDATE locks — that stalls the blotter UI.
+        return (
+            query.order_by(Trade.created_at.desc())
+            .offset((_page - 1) * _limit)
+            .limit(_limit)
+            .all()
+        )
 
     def add(self, trade):
         self.db_session.add(trade)
@@ -66,12 +73,15 @@ class ValuationRepository:
     def add(self, valuation):
         self.db_session.add(valuation)
 
-    def get_valuations_by_trade_id(self, trade_id):
-        return (
+    def get_valuations_by_trade_id(self, trade_id, limit=50):
+        query = (
             self.db_session.query(Valuation)
             .filter(Valuation.trade_id == trade_id)
-            .all()
+            .order_by(Valuation.valuation_time.desc())
         )
+        if limit is not None:
+            query = query.limit(int(limit))
+        return query.all()
 
 
 class InstrumentRepository:

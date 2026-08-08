@@ -17,7 +17,6 @@ import queue
 import threading
 import time
 import uuid
-import random
 from datetime import datetime, timezone
 
 from market_data_simulator import MarketDataSimulator
@@ -37,17 +36,20 @@ health_stats = {
     "status": ServiceStatus.UP.value,
     "generated_events": 0,
     "last_event_time": None,
+    "last_symbol": None,
+    "last_asset_type": None,
 }
 batch_size = 30
 
 market_simulator = MarketDataSimulator()
-
 
 def metric_worker():
     global health_stats
 
     local_events_count = 0
     local_last_time = None
+    local_last_symbol = None
+    local_last_asset_type = None
 
     while True:
         try:
@@ -56,6 +58,8 @@ def metric_worker():
                 logging.info(f"Processing metric: {message['type']} at {message['timestamp']}")
                 local_events_count += 1
                 local_last_time = message["timestamp"]
+                local_last_symbol = message.get("symbol") or local_last_symbol
+                local_last_asset_type = message.get("asset_type") or local_last_asset_type
 
             metrics_queue.task_done()
 
@@ -64,6 +68,8 @@ def metric_worker():
                 "status": ServiceStatus.UP.value,
                 "generated_events": local_events_count,
                 "last_event_time": local_last_time,
+                "last_symbol": local_last_symbol,
+                "last_asset_type": local_last_asset_type,
             }
 
         except Exception as e:
@@ -88,13 +94,15 @@ def generate_market_tick():
     eur_rates = market_simulator.generate_eur_curve_tick()
     option_details = market_simulator.generate_option_details()
     irs_details = market_simulator.generate_irs_details()
+    benchmark_level = market_simulator.generate_benchmark_tick()
 
     market_tick_data = {
         "ACME_OPT": {
-            "event_id": global_event_id - 6,
+            "event_id": global_event_id - 7,
             "asset_type": AssetClass.OPTION.value,
             "timestamp": current_tmsp,
             "symbol": "ACME",
+            "currency": "USD",
             "spot": option_details["spot"],
             "strike": option_details["strike"],
             "option_right_type": option_details["option_right_type"],
@@ -102,7 +110,7 @@ def generate_market_tick():
             "volatility": option_details["volatility"],
         },
         "IRS": {
-            "event_id": global_event_id - 5,
+            "event_id": global_event_id - 6,
             "asset_type": AssetClass.IRS.value,
             "timestamp": current_tmsp,
             "currency": irs_details["currency"],
@@ -112,29 +120,37 @@ def generate_market_tick():
             "payments_per_year": irs_details["payments_per_year"],
             "direction": irs_details["direction"],
         },
-        # "ACME": {
-        #     "event_id": global_event_id - 4,
-        #     "asset_type": AssetClass.EQUITY.value,
-        #     "timestamp": current_tmsp,
-        #     "symbol": "ACME",
-        #     "bid": eq_tick["bid"],
-        #     "ask": eq_tick["ask"],
-        #     "last": eq_tick["last"],
-        # },
-        # "GOVT_5Y": {
-        #     "event_id": global_event_id - 3,
-        #     "asset_type": AssetClass.BOND.value,
-        #     "timestamp": current_tmsp,
-        #     "symbol": "GOVT_5Y",
-        #     "yield": bond_yield,
-        # },
-        # "EURUSD": {
-        #     "event_id": global_event_id - 2,
-        #     "asset_type": AssetClass.FX.value,
-        #     "symbol": "EURUSD",
-        #     "timestamp": current_tmsp,
-        #     "spot": fx_spot,
-        # },
+        "MARKET_INDEX": {
+            "event_id": global_event_id - 5,
+            "asset_type": AssetClass.BENCHMARK.value,
+            "timestamp": current_tmsp,
+            "symbol": "MARKET_INDEX",
+            "currency": "USD",
+            "last": benchmark_level,
+        },
+        "ACME": {
+            "event_id": global_event_id - 4,
+            "asset_type": AssetClass.EQUITY.value,
+            "timestamp": current_tmsp,
+            "symbol": "ACME",
+            "bid": eq_tick["bid"],
+            "ask": eq_tick["ask"],
+            "last": eq_tick["last"],
+        },
+        "GOVT_5Y": {
+            "event_id": global_event_id - 3,
+            "asset_type": AssetClass.BOND.value,
+            "timestamp": current_tmsp,
+            "symbol": "GOVT_5Y",
+            "yield": bond_yield,
+        },
+        "EURUSD": {
+            "event_id": global_event_id - 2,
+            "asset_type": AssetClass.FX.value,
+            "symbol": "EURUSD",
+            "timestamp": current_tmsp,
+            "spot": fx_spot,
+        },
         "USD_YIELD_CURVE": {
             "event_id": global_event_id - 1,
             "curve_id": str(uuid.uuid4()),
@@ -159,7 +175,19 @@ def generate_market_tick():
         },
     }
 
-    metrics_queue.put({"type": "EVENT_GENERATED", "timestamp": current_tmsp})
+    # Prefer a liquid cash instrument for monitoring "last tick" detail.
+    representative = market_tick_data.get("ACME") or next(
+        (tick for tick in market_tick_data.values() if tick.get("symbol")),
+        {},
+    )
+    metrics_queue.put(
+        {
+            "type": "EVENT_GENERATED",
+            "timestamp": current_tmsp,
+            "symbol": representative.get("symbol"),
+            "asset_type": representative.get("asset_type"),
+        }
+    )
     return market_tick_data
 
 
@@ -319,6 +347,9 @@ def db_worker():
                     elif asset_type == AssetClass.OPTION.value:
                         record.spot = data.get("spot")
                         # volatility siedzi w raw_payload; kolumna spot/last nie ma pola vol
+                    elif asset_type == AssetClass.BENCHMARK.value:
+                        record.spot = data.get("spot")
+                        record.last = data.get("last")
 
                     buffer.append(record)
 
