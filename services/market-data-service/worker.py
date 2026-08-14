@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 
 from market_data_simulator import MarketDataSimulator
 
+# Each entry is a dict: {id, queue, ip, user_agent, origin, connected_at, messages_sent}
 subscribers = []
 data_lock = threading.Lock()
 audit_logger = AuditLogger("market-data-service")
@@ -113,6 +114,8 @@ def generate_market_tick():
             "event_id": global_event_id - 6,
             "asset_type": AssetClass.IRS.value,
             "timestamp": current_tmsp,
+            # Tradeable symbol keyed by currency (needed by /symbols + spot persistence).
+            "symbol": f"{irs_details['currency']}_IRS",
             "currency": irs_details["currency"],
             "notional": irs_details["notional"],
             "fixed_rate": irs_details["fixed_rate"],
@@ -205,11 +208,15 @@ def update_snapshot(market_tick_data):
 
 def publish_tick_to_stream(market_tick_data):
     with data_lock:
-        for _, instrument_data in market_tick_data.items():
-            logging.info(f"Publishing tick to stream: {instrument_data}")
+        subscriber_ids = [subscriber["id"] for subscriber in subscribers]
+        for instrument_data in market_tick_data.values():
             msg = f"data: {json.dumps(instrument_data)}\n\n"
-            for subscriber_queue in subscribers:
-                subscriber_queue.put(msg)
+            for subscriber in subscribers:
+                subscriber["queue"].put(msg)
+
+    logging.info(
+        f"Published {len(market_tick_data)} ticks to {len(subscriber_ids)} subscriber(s): {subscriber_ids}"
+    )
 
 
 def persist_curves(market_tick_data):
@@ -294,24 +301,27 @@ def market_worker():
 
 
 def symbols():
-    with DBSessionManager() as db:
-        try:
-            data = db.session.query(MarketDataSpotPrice).all()
-            grouped_symbols = {}
-            logging.info(
-                f"Fetched {len(data)} market data records from DB for symbol extraction"
-            )
-            for item in data:
-                if item.asset_class:
-                    if item.asset_class not in grouped_symbols:
-                        grouped_symbols[item.asset_class] = []
+    """Return tradeable symbols grouped by asset class.
 
-                    if item.symbol not in grouped_symbols[item.asset_class]:
-                        grouped_symbols[item.asset_class].append(item.symbol)
-            logging.info(f"Grouped symbols by asset class: {grouped_symbols}")
-            return grouped_symbols
-        finally:
-            pass
+    Derived from the live in-memory snapshot — not the historical spot table.
+    Querying MarketDataSpotPrice.all() grows without bound and exhausted the
+    SQLAlchemy pool (blocking trade-generation OPEN intents).
+    """
+    with data_lock:
+        snapshot = dict(market_tick_data_state)
+
+    grouped_symbols = {}
+    for tick in snapshot.values():
+        asset_class = tick.get("asset_type")
+        symbol = tick.get("symbol")
+        if not asset_class or not symbol:
+            continue
+        bucket = grouped_symbols.setdefault(asset_class, [])
+        if symbol not in bucket:
+            bucket.append(symbol)
+
+    logging.info(f"Grouped symbols by asset class: {grouped_symbols}")
+    return grouped_symbols
 
 
 def db_worker():
@@ -326,16 +336,24 @@ def db_worker():
                     if "curve_type" in data:
                         continue
 
+                    symbol = data.get("symbol")
+                    asset_type = data.get("asset_type")
+                    if not symbol or not asset_type:
+                        logging.warning(
+                            "Skipping spot persist: missing symbol/asset_type in tick %s",
+                            data.get("event_id"),
+                        )
+                        continue
+
                     record = MarketDataSpotPrice(
                         event_id=data.get("event_id"),
-                        symbol=data["symbol"],
-                        asset_class=data["asset_type"],
+                        symbol=symbol,
+                        asset_class=asset_type,
                         source="GENERATED",
                         event_time=datetime.now(timezone.utc),
                         raw_payload=data,
                     )
 
-                    asset_type = data["asset_type"]
                     if asset_type == AssetClass.EQUITY.value:
                         record.bid = data.get("bid")
                         record.ask = data.get("ask")
@@ -350,6 +368,9 @@ def db_worker():
                     elif asset_type == AssetClass.BENCHMARK.value:
                         record.spot = data.get("spot")
                         record.last = data.get("last")
+                    elif asset_type == AssetClass.IRS.value:
+                        # Contract params live in raw_payload; persist fixed_rate as last for visibility.
+                        record.last = data.get("fixed_rate")
 
                     buffer.append(record)
 

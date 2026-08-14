@@ -98,6 +98,27 @@ def trade_action_handler(data):
 
                     # IRS jest wyceniany krzywą stóp — parametry kontraktu trzymamy
                     # w metadata_payload, a nie jako spot/price danych rynkowych.
+                    required_irs = (
+                        "notional",
+                        "fixed_rate",
+                        "maturity_years",
+                        "direction",
+                    )
+                    missing_irs = [key for key in required_irs if data.get(key) is None]
+                    if missing_irs:
+                        logging.error(
+                            f"OPEN_TRADE IRS rejected: missing params {missing_irs} "
+                            f"for client_request_id {client_request_id}"
+                        )
+                        metrics.record_error(
+                            action_type,
+                            client_request_id,
+                            symbol,
+                            f"missing IRS params {missing_irs}",
+                            enqueued_at,
+                        )
+                        return
+
                     metadata_payload = {
                         "notional": data.get("notional"),
                         "fixed_rate": data.get("fixed_rate"),
@@ -107,6 +128,8 @@ def trade_action_handler(data):
                     }
                     # IRS wchodzi na rynek z PV ~ 0.
                     trade_price = data.get("trade_price")
+                    if trade_price is None:
+                        trade_price = 0
                     process_note = "IRS metadata"
                 else:
                     trade_price = data.get("trade_price")

@@ -1,8 +1,10 @@
 import logging
 import queue
 import threading
+import time
+import uuid
 
-from bottle import Bottle, response
+from bottle import Bottle, request, response
 from custom_server import ThreadedServer
 
 from shared.trading_shared.audit import AuditLogger
@@ -17,7 +19,9 @@ app = Bottle()
 
 @app.route("/health")
 def health():
-    return worker.health_stats
+    with worker.data_lock:
+        subscriber_count = len(worker.subscribers)
+    return {**worker.health_stats, "active_subscribers": subscriber_count}
 
 
 @app.route("/symbols")
@@ -44,11 +48,16 @@ def snapshot():
 def stream():
     response.content_type = "text/event-stream"
     client_queue = queue.Queue()
+    subscriber = {"id": str(uuid.uuid4())[:8], "queue": client_queue}
 
     with worker.data_lock:
-        worker.subscribers.append(client_queue)
+        worker.subscribers.append(subscriber)
+        subscriber_count = len(worker.subscribers)
 
-    logging.info(f"Client connected to stream. Active subscribers: {len(worker.subscribers)}")
+    logging.info(
+        f"Client {subscriber['id']} connected to stream. "
+        f"Active subscribers: {subscriber_count}"
+    )
 
     def event_generator():
         try:
@@ -58,12 +67,14 @@ def stream():
         except Exception as e:
             logging.error(f"Error while generating event: {e}")
         finally:
-            if client_queue in worker.subscribers:
-                with worker.data_lock:
-                    worker.subscribers.remove(client_queue)
-                logging.info(
-                    f"Client disconnected from stream. Active subscribers: {len(worker.subscribers)}"
-                )
+            with worker.data_lock:
+                if subscriber in worker.subscribers:
+                    worker.subscribers.remove(subscriber)
+                subscriber_count = len(worker.subscribers)
+            logging.info(
+                f"Client {subscriber['id']} disconnected from stream. "
+                f"Active subscribers: {subscriber_count}"
+            )
 
     return event_generator()
 

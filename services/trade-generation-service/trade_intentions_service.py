@@ -1,16 +1,146 @@
 import datetime
+import os
 import random
 import uuid
 from shared.trading_shared.db import DBSessionManager
 from shared.trading_shared.decorators import retry
-from shared.trading_shared.enums import ActionType, TradeStatus, TradeSide
-from shared.trading_shared.models import Trade
+from shared.trading_shared.enums import ActionType, AssetClass, TradeStatus, TradeSide
 import logging
 import urllib.request
 import json
 
 # TODO threading event moze? (wait)
 generator_state = {"is_running": False, "total_generated": 0, "thread": None}
+
+_DEFAULT_INTERVAL_MS = int(
+    os.getenv(
+        "TRADE_GENERATION_INTERVAL_MS",
+        os.getenv("TICK_INTERVAL_MS", "4000"),
+    )
+)
+
+generator_config = {
+    "interval_ms": _DEFAULT_INTERVAL_MS,
+    "batch_size": 10,
+    "open_weight_pct": 70,
+    "close_weight_pct": 30,
+    "qty_min": 10,
+    "qty_max": 1000,
+    "price_min": 50.0,
+    "price_max": 150.0,
+}
+
+CONFIG_KEYS = frozenset(generator_config.keys())
+
+
+def get_config():
+    return dict(generator_config)
+
+
+def expected_rate_per_sec():
+    if not generator_state["is_running"]:
+        return 0.0
+    interval_ms = generator_config["interval_ms"]
+    if interval_ms <= 0:
+        return 0.0
+    return round(1000.0 / interval_ms, 4)
+
+
+def _as_int(value, field):
+    try:
+        if isinstance(value, bool):
+            raise ValueError
+        return int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field} must be an integer")
+
+
+def _as_float(value, field):
+    try:
+        if isinstance(value, bool):
+            raise ValueError
+        return float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field} must be a number")
+
+
+def update_config(payload):
+    """Apply a partial config update. Returns the new config or raises ValueError."""
+    if not isinstance(payload, dict) or not payload:
+        raise ValueError("Request body must be a non-empty JSON object")
+
+    unknown = set(payload.keys()) - CONFIG_KEYS
+    if unknown:
+        raise ValueError(f"Unknown config keys: {', '.join(sorted(unknown))}")
+
+    next_config = dict(generator_config)
+
+    if "interval_ms" in payload:
+        interval_ms = _as_int(payload["interval_ms"], "interval_ms")
+        if interval_ms < 50:
+            raise ValueError("interval_ms must be >= 50")
+        next_config["interval_ms"] = interval_ms
+
+    if "batch_size" in payload:
+        batch_size = _as_int(payload["batch_size"], "batch_size")
+        if batch_size < 1 or batch_size > 100:
+            raise ValueError("batch_size must be between 1 and 100")
+        next_config["batch_size"] = batch_size
+
+    has_open = "open_weight_pct" in payload
+    has_close = "close_weight_pct" in payload
+    if has_open or has_close:
+        if has_open:
+            open_weight = _as_int(payload["open_weight_pct"], "open_weight_pct")
+            if open_weight < 0 or open_weight > 100:
+                raise ValueError("open_weight_pct must be between 0 and 100")
+        else:
+            open_weight = next_config["open_weight_pct"]
+
+        if has_close:
+            close_weight = _as_int(payload["close_weight_pct"], "close_weight_pct")
+            if close_weight < 0 or close_weight > 100:
+                raise ValueError("close_weight_pct must be between 0 and 100")
+        else:
+            close_weight = next_config["close_weight_pct"]
+
+        if has_open and not has_close:
+            close_weight = 100 - open_weight
+        elif has_close and not has_open:
+            open_weight = 100 - close_weight
+        elif open_weight + close_weight != 100:
+            raise ValueError("open_weight_pct and close_weight_pct must sum to 100")
+
+        next_config["open_weight_pct"] = open_weight
+        next_config["close_weight_pct"] = close_weight
+
+    if "qty_min" in payload:
+        next_config["qty_min"] = _as_int(payload["qty_min"], "qty_min")
+    if "qty_max" in payload:
+        next_config["qty_max"] = _as_int(payload["qty_max"], "qty_max")
+
+    qty_min = next_config["qty_min"]
+    qty_max = next_config["qty_max"]
+    if qty_min < 1 or qty_max > 1_000_000:
+        raise ValueError("qty_min/qty_max must be between 1 and 1000000")
+    if qty_min > qty_max:
+        raise ValueError("qty_min must be <= qty_max")
+
+    if "price_min" in payload:
+        next_config["price_min"] = _as_float(payload["price_min"], "price_min")
+    if "price_max" in payload:
+        next_config["price_max"] = _as_float(payload["price_max"], "price_max")
+
+    price_min = next_config["price_min"]
+    price_max = next_config["price_max"]
+    if price_min <= 0 or price_max <= 0:
+        raise ValueError("price_min and price_max must be > 0")
+    if price_min >= price_max:
+        raise ValueError("price_min must be < price_max")
+
+    generator_config.update(next_config)
+    return get_config()
+
 
 # jak constrainy moze wplynac na transakcje DB -> duze tabele i sprawdzanie id w trakcie insertow
 # profiling
@@ -46,10 +176,17 @@ def send_to_trade_action_service(payload):
 
 def generate_open_or_close_trade():
     return random.choices(
-        [ActionType.OPEN_TRADE.value, ActionType.CLOSE_TRADE.value], weights=[0.7, 0.3]
+        [ActionType.OPEN_TRADE.value, ActionType.CLOSE_TRADE.value],
+        weights=[
+            generator_config["open_weight_pct"],
+            generator_config["close_weight_pct"],
+        ],
     )[0]
 
-def generate_and_send_to_trade_action_service_batch(count=10):
+def generate_and_send_to_trade_action_service_batch(count=None):
+    if count is None:
+        count = generator_config["batch_size"]
+
     batch_payload = []
 
     for _ in range(count):
@@ -84,6 +221,60 @@ def generate_and_send_to_trade_action_service():
 
 def generate_request_id():
     return f"req-{datetime.datetime.now().strftime('%Y%m%d')}-{uuid.uuid4()}"
+
+
+IRS_OPEN_FIELDS = (
+    "notional",
+    "fixed_rate",
+    "maturity_years",
+    "payments_per_year",
+    "direction",
+)
+IRS_REQUIRED_FIELDS = ("notional", "fixed_rate", "maturity_years", "direction")
+OPTION_OPEN_FIELDS = (
+    "spot",
+    "strike",
+    "volatility",
+    "maturity_years",
+    "option_right_type",
+    "option_type",
+    "option_price",
+)
+
+
+def _tick_for_symbol(snapshot, symbol, asset_class):
+    if not isinstance(snapshot, dict):
+        return None
+    for tick in snapshot.values():
+        if not isinstance(tick, dict):
+            continue
+        if tick.get("symbol") == symbol and tick.get("asset_type") == asset_class:
+            return tick
+    return None
+
+
+def _copy_tick_fields(tick, fields):
+    return {key: tick[key] for key in fields if tick.get(key) is not None}
+
+
+def _enrich_open_payload(payload, asset_class, tick):
+    """Copy contract params from the live market-data tick onto an OPEN intent.
+
+    IRS/OPTION pricing reads these from trade.metadata_payload — a generic
+    equity-style OPEN (qty + random price) leaves them empty and gets skipped.
+    """
+    if not tick:
+        return payload
+    if asset_class == AssetClass.IRS.value:
+        payload.update(_copy_tick_fields(tick, IRS_OPEN_FIELDS))
+        if tick.get("currency"):
+            payload["currency"] = tick["currency"]
+        payload["trade_price"] = 0
+    elif asset_class == AssetClass.OPTION.value:
+        payload.update(_copy_tick_fields(tick, OPTION_OPEN_FIELDS))
+        if tick.get("currency"):
+            payload["currency"] = tick["currency"]
+    return payload
 
 
 def generate_random_intention():
@@ -128,6 +319,7 @@ def generate_random_intention():
 
                 response = fetch_json("http://books-service:8004/books")
                 symbols_response = fetch_json("http://market-data-service:8001/symbols")
+                snapshot = fetch_json("http://market-data-service:8001/snapshot")
 
                 books_data = response.get("books", []) if response else []
                 symbols_data = symbols_response if symbols_response else {}
@@ -148,7 +340,18 @@ def generate_random_intention():
                     f"Fetched book {book.get('book_id')} with asset class {book_asset_class}."
                 )
 
-                available_symbols = symbols_data.get(book_asset_class, [])
+                # Books may use legacy/alias names (e.g. EUROPEAN_OPTION) while
+                # market-data catalogs under AssetClass enum values (OPTION).
+                _ASSET_CLASS_ALIASES = {
+                    "EUROPEAN_OPTION": AssetClass.OPTION.value,
+                    "EUROPEAN_OPTIONS": AssetClass.OPTION.value,
+                }
+                lookup_class = _ASSET_CLASS_ALIASES.get(
+                    book_asset_class, book_asset_class
+                )
+                available_symbols = symbols_data.get(lookup_class, [])
+                if not available_symbols and lookup_class != book_asset_class:
+                    available_symbols = symbols_data.get(book_asset_class, [])
 
                 if not available_symbols:
                     logging.error(
@@ -166,10 +369,32 @@ def generate_random_intention():
                     "asset_class": book_asset_class,
                     "symbol": symbol,
                     "side": random.choice([TradeSide.BUY.value, TradeSide.SELL.value]),
-                    "quantity": random.randint(1, 100) * 10,
-                    "trade_price": round(random.uniform(50.0, 150.0), 4),
+                    "quantity": random.randint(
+                        generator_config["qty_min"],
+                        generator_config["qty_max"],
+                    ),
+                    "trade_price": round(
+                        random.uniform(
+                            generator_config["price_min"],
+                            generator_config["price_max"],
+                        ),
+                        4,
+                    ),
                     "currency": "USD",
                 }
+                tick = _tick_for_symbol(snapshot, symbol, lookup_class)
+                payload = _enrich_open_payload(payload, lookup_class, tick)
+                if lookup_class == AssetClass.IRS.value:
+                    missing = [
+                        key
+                        for key in IRS_REQUIRED_FIELDS
+                        if payload.get(key) is None
+                    ]
+                    if missing:
+                        logging.error(
+                            f"Operation aborted: IRS tick missing {missing} for {symbol}."
+                        )
+                        return None
                 logging.info(f"Success! Generated JSON for opening: {payload}")
                 return payload
 

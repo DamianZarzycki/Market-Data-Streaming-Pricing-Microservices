@@ -3,6 +3,7 @@ import logging
 from shared.trading_shared.audit import AuditLogger
 from shared.trading_shared.enums import EntityType, EventType, TradeStatus
 from shared.trading_shared.models import Book, Trade
+from sqlalchemy import exists
 
 audit_logger = AuditLogger("books-manager-service")
 
@@ -103,6 +104,8 @@ def update_book(db, book_id, data, updated_by=None):
         book.description = data["description"]
 
     if "expected_asset_class" in data and data["expected_asset_class"]:
+        # checking if books has active trades 
+        active_trades = count_active_trades(db, book_id)
         book.expected_asset_class = data["expected_asset_class"]
 
     if "is_active" in data:
@@ -131,6 +134,14 @@ def count_active_trades(db, book_id) -> int:
         )
         .count()
     )
+    
+def has_active_trades(db, book_id) -> bool:
+    return db.query(
+        exists().where(
+            Trade.book_id == book_id,
+            Trade.status == TradeStatus.ACTIVE.value,
+        )
+    ).scalar()
 
 
 def delete_book(db, book_id):

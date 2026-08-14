@@ -2,7 +2,7 @@ import logging
 import worker
 import threading
 import trade_intentions_service
-from bottle import Bottle, response
+from bottle import Bottle, request, response
 from shared.trading_shared.enums import ServiceStatus
 from shared.trading_shared.logging_config import configure_logging
 from custom_server import ThreadedServer
@@ -30,7 +30,6 @@ def generate_once():
     return intention if intention else {"message": "No trade intention generated."}
 
 
-# TODO mozesz dodac randomizacje tego | kompresja
 @app.route("/generate-batch", method=["GET"])
 def generate_multiple():
     logging.info("Received request to generate multiple trade intentions")
@@ -77,10 +76,34 @@ def stop_generation():
     return {"message": "Generator was stopped."}
 
 
+@app.route("/config", method=["GET"])
+def get_config():
+    return trade_intentions_service.get_config()
+
+
+@app.route("/config", method=["PUT"])
+def put_config():
+    payload = request.json
+    try:
+        config = trade_intentions_service.update_config(payload)
+    except ValueError as exc:
+        response.status = 400
+        return {"message": str(exc)}
+
+    return {
+        "message": "Config updated successfully.",
+        "config": config,
+    }
+
+
 @app.route("/status", method=["GET"])
 def status():
     state = trade_intentions_service.generator_state
-    return {k: v for k, v in state.items() if k != "thread"}
+    return {
+        **{k: v for k, v in state.items() if k != "thread"},
+        "config": trade_intentions_service.get_config(),
+        "expected_rate_per_sec": trade_intentions_service.expected_rate_per_sec(),
+    }
 
 
 if __name__ == "__main__":
