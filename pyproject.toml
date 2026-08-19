@@ -1,3 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trading-backend"
+version = "0.0.0"
+requires-python = ">=3.11"
+dependencies = [
+    "alembic",
+    "bottle",
+    "psycopg[binary]",
+    "SQLAlchemy",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["shared*"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"

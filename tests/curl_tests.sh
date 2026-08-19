@@ -305,6 +305,39 @@ section "PHASE 5 — Trade Generation Service"
 echo "--- GET /status ---"
 curl_get "$TRADE_GEN/status"
 check_status "GET /status (trade-generation)" "200" "$HTTP_STATUS"
+STATUS_HAS_CONFIG=$(cat /tmp/curl_body.json | jq 'has("config")')
+if [[ "$STATUS_HAS_CONFIG" == "false" ]]; then
+  echo "  [PASS] GET /status does not include config"
+  PASS=$((PASS + 1))
+else
+  echo "  [FAIL] GET /status should not include config"
+  FAIL=$((FAIL + 1))
+fi
+
+echo "--- GET /config ---"
+curl_get "$TRADE_GEN/config"
+check_status "GET /config (trade-generation)" "200" "$HTTP_STATUS"
+CONFIG_INTERVAL=$(cat /tmp/curl_body.json | jq -r '.interval_ms // empty')
+if [[ -n "$CONFIG_INTERVAL" ]]; then
+  echo "  [PASS] GET /config includes interval_ms"
+  PASS=$((PASS + 1))
+else
+  echo "  [FAIL] GET /config missing interval_ms"
+  FAIL=$((FAIL + 1))
+fi
+
+echo "--- PUT /config ---"
+curl_put "$TRADE_GEN/config" '{"batch_size": 11}'
+check_status "PUT /config (trade-generation)" "200" "$HTTP_STATUS"
+PUT_BATCH=$(cat /tmp/curl_body.json | jq -r '.config.batch_size // empty')
+if [[ "$PUT_BATCH" == "11" ]]; then
+  echo "  [PASS] PUT /config returns updated batch_size"
+  PASS=$((PASS + 1))
+else
+  echo "  [FAIL] PUT /config expected batch_size 11, got: $PUT_BATCH"
+  FAIL=$((FAIL + 1))
+fi
+curl_put "$TRADE_GEN/config" '{"batch_size": 10}' >/dev/null
 
 echo "--- GET /generate-once ---"
 curl_get "$TRADE_GEN/generate-once"

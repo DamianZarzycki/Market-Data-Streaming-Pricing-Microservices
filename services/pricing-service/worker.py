@@ -1,3 +1,4 @@
+import queue
 import json
 import logging
 import threading
@@ -5,8 +6,10 @@ import time
 from urllib import request
 import cache_service
 import calculation_service
+import valuation_service
 from shared.trading_shared.audit import AuditLogger
 from shared.trading_shared.enums import ConnectionStatus, EventType
+from shared.trading_shared.db import DBSessionManager
 
 stats_lock = threading.Lock()
 audit_logger = AuditLogger("pricing-service")
@@ -17,8 +20,6 @@ last_market_event_time = None
 last_pricing_time = None
 last_valuation_symbol = None
 last_valuation_asset_class = None
-
-
 
 def connect_to_market_data_stream():
     global connection_status
@@ -122,3 +123,25 @@ def cache_refresh_worker():
     while True:
         cache_service.reload_active_trades_cache()
         time.sleep(5)
+
+
+def valuation_worker():
+    while True:
+        time.sleep(0.2)
+        batch = []
+        while True:
+            try:
+                item = calculation_service.trade_valuation_queue.get_nowait()
+            except queue.Empty:
+                break
+            batch.append(valuation_service.to_valuation(item))
+            calculation_service.trade_valuation_queue.task_done()
+        if not batch:
+            continue
+        try:
+            with DBSessionManager() as db:
+                db.valuations.add_all(batch)
+                db.commit()
+            logging.info(f"Saved {len(batch)} valuations to DB")
+        except Exception as e:
+            logging.error(f"Error flushing valuations: {e}")

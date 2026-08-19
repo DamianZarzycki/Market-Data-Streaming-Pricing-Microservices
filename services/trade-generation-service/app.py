@@ -1,15 +1,17 @@
 import logging
-import worker
 import threading
+
 import trade_intentions_service
+import worker
 from bottle import Bottle, request, response
-from shared.trading_shared.enums import ServiceStatus
-from shared.trading_shared.logging_config import configure_logging
 from custom_server import ThreadedServer
 
+from shared.trading_shared.enums import ServiceStatus
+from shared.trading_shared.logging_config import configure_logging
 
 configure_logging("trade-generation-service")
 app = Bottle()
+logging.info("Runtime generator config: %s", trade_intentions_service.get_config())
 
 
 @app.route("/health")
@@ -36,9 +38,7 @@ def generate_multiple():
     if not trade_intentions_service.generator_state["is_running"]:
         logging.info("DB worker not running")
 
-    intentions = (
-        trade_intentions_service.generate_and_send_to_trade_action_service_batch()
-    )
+    intentions = trade_intentions_service.generate_and_send_to_trade_action_service_batch()
     if intentions:
         return {
             "message": f"Successfully generated {len(intentions)} intentions",
@@ -55,11 +55,9 @@ def start_generation():
         return {"message": "Generator is already running!"}
 
     trade_intentions_service.generator_state["is_running"] = True
-    trade_intentions_service.generator_state["thread"] = threading.Thread(
-        target=worker.trade_generation_worker
-    )
-    trade_intentions_service.generator_state["thread"].daemon = True
-    trade_intentions_service.generator_state["thread"].start()
+    thread = threading.Thread(target=worker.trade_generation_worker, daemon=True)
+    trade_intentions_service.generator_state["thread"] = thread
+    thread.start()
 
     return {"message": "Generator started successfully."}
 
@@ -100,8 +98,8 @@ def put_config():
 def status():
     state = trade_intentions_service.generator_state
     return {
-        **{k: v for k, v in state.items() if k != "thread"},
-        "config": trade_intentions_service.get_config(),
+        "is_running": state["is_running"],
+        "total_generated": state["total_generated"],
         "expected_rate_per_sec": trade_intentions_service.expected_rate_per_sec(),
     }
 

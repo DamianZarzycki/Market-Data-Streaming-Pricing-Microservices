@@ -1,24 +1,25 @@
-from datetime import datetime, timezone
 import logging
 import queue
 import threading
-from shared.trading_shared.db import DBSessionManager
-from shared.trading_shared.enums import AssetClass, OptionRightType, TradeSide
-from math import erf, sqrt, log
+from datetime import datetime, timezone
+from math import erf, log, sqrt
 
-import valuation_service
 from instruments_pricing.irs_pricing_service import price_irs
 from instruments_pricing.option_pricing_service import (
     calculate_european_call_option_price,
     calculate_european_put_option_price,
 )
 
+from shared.trading_shared.db import DBSessionManager
+from shared.trading_shared.enums import AssetClass, OptionRightType, TradeSide
+
 pricing_lock = threading.Lock()
-metrics_queue = queue.Queue()   # consumed by metrics_worker for internal stats
-sse_subscribers = []            # list of per-client queues for /valuation-stream
+metrics_queue = queue.Queue()  # consumed by metrics_worker for internal stats
+sse_subscribers = []  # list of per-client queues for /valuation-stream
 sse_subscribers_lock = threading.Lock()
 
-valuations_store = {}           # keyed by str(trade_id) -> latest valuation dict
+valuations_store = {}  # keyed by str(trade_id) -> latest valuation dict
+trade_valuation_queue = queue.Queue()
 
 
 def current_timestamp():
@@ -111,7 +112,7 @@ def _price_trade(tick, trade, asset_type):
         multiplier = float(contract_multiplier)
         fair_value = round(current_price * multiplier * quantity, 4)
         market_value = fair_value
-    
+
     elif asset_type == "OPTION":
         spot = tick.get("spot")
         volatility = tick.get("volatility")
@@ -173,6 +174,7 @@ def _price_trade(tick, trade, asset_type):
 
 def store_and_publish(trade, valuation_data):
     trade_id = valuation_data["trade_id"]
+    trade_valuation_queue.put(valuation_data)
 
     with pricing_lock:
         valuations_store[trade_id] = valuation_data
@@ -182,17 +184,17 @@ def store_and_publish(trade, valuation_data):
         f"fair_value={valuation_data.get('fair_value')}, unrealized_pnl={valuation_data.get('unrealized_pnl')}"
     )
 
-    valuation_service.save_valuation(trade, valuation_data)
-
-    metrics_queue.put({
-        "type": "PRICING_DONE",
-        "timestamp": valuation_data["valuation_time"],
-        "trade_id": trade_id,
-        "instrument": trade_id,
-        "symbol": valuation_data.get("symbol"),
-        "asset_class": valuation_data.get("asset_class"),
-        "value": valuation_data.get("fair_value"),
-    })
+    metrics_queue.put(
+        {
+            "type": "PRICING_DONE",
+            "timestamp": valuation_data["valuation_time"],
+            "trade_id": trade_id,
+            "instrument": trade_id,
+            "symbol": valuation_data.get("symbol"),
+            "asset_class": valuation_data.get("asset_class"),
+            "value": valuation_data.get("fair_value"),
+        }
+    )
     logging.info(f"Published valuation for trade {trade_id} to metrics queue.")
     with sse_subscribers_lock:
         for subscriber_queue in sse_subscribers:
@@ -274,13 +276,12 @@ def update_curve_and_reprice_irs(tick):
 
     with cache_service.cache_lock:
         irs_trades = [
-            t for t in cache_service.active_trades_cache.values()
+            t
+            for t in cache_service.active_trades_cache.values()
             if t.asset_class == AssetClass.IRS.value and t.trade_currency == currency
         ]
 
-    logging.info(
-        f"{currency} {curve_type} curve: repricing {len(irs_trades)} IRS trade(s)"
-    )
+    logging.info(f"{currency} {curve_type} curve: repricing {len(irs_trades)} IRS trade(s)")
     for trade in irs_trades:
         try:
             price_irs_trade(trade, curve)
@@ -290,8 +291,8 @@ def update_curve_and_reprice_irs(tick):
 
 def recalculate_valuations(tick):
     """Route an incoming market tick: curve ticks reprice IRS, spot ticks reprice by symbol."""
-    import cache_service
     import book_metrics_service
+    import cache_service
 
     if tick.get("curve_id"):
         update_curve_and_reprice_irs(tick)
@@ -311,7 +312,8 @@ def recalculate_valuations(tick):
 
     with cache_service.cache_lock:
         matching_trades = [
-            t for t in cache_service.active_trades_cache.values()
+            t
+            for t in cache_service.active_trades_cache.values()
             if t.symbol == symbol and t.asset_class == asset_type
         ]
 
@@ -320,4 +322,3 @@ def recalculate_valuations(tick):
             _price_trade(tick, trade, asset_type)
         except Exception as e:
             logging.error(f"Error pricing trade {trade.trade_id}: {e}")
-

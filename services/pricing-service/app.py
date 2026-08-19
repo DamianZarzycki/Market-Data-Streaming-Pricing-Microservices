@@ -10,7 +10,7 @@ from shared.trading_shared.enums import EventType
 from shared.trading_shared.logging_config import configure_logging
 import worker
 import calculation_service
-import book_metrics_service
+import books.book_metrics_service
 
 configure_logging("pricing-service")
 app = Bottle()
@@ -64,9 +64,7 @@ def book_metrics_by_id(book_id):
         return metrics
 
     error_body = json.dumps({"error": "No metrics available for book_id: " + book_id})
-    return HTTPResponse(
-        status=404, body=error_body, headers={"Content-Type": "application/json"}
-    )
+    return HTTPResponse(status=404, body=error_body, headers={"Content-Type": "application/json"})
 
 
 @app.route("/valuation-stream")
@@ -141,9 +139,41 @@ if __name__ == "__main__":
     cache_thread.daemon = True
     cache_thread.start()
 
+    cache_thread = threading.Thread(target=worker.valuation_worker)
+    cache_thread.daemon = True
+    cache_thread.start()
+
+    audit_logger.info(
+        EventType.WORKER_STARTED,
+        "Valuation thread started",
+        entity_type="Service",
+        correlation_id=None,
+    )
+
     try:
         app.run(host="0.0.0.0", port=8002, server=ThreadedServer)
     finally:
-        audit_logger.info(EventType.WORKER_STOPPED, "Market thread stopped", entity_type="Service", correlation_id=None)
-        audit_logger.info(EventType.WORKER_STOPPED, "Metrics thread stopped", entity_type="Service", correlation_id=None)
-        audit_logger.info(EventType.WORKER_STOPPED, "Cache refresh thread stopped", entity_type="Service", correlation_id=None)
+        audit_logger.info(
+            EventType.WORKER_STOPPED,
+            "Market thread stopped",
+            entity_type="Service",
+            correlation_id=None,
+        )
+        audit_logger.info(
+            EventType.WORKER_STOPPED,
+            "Metrics thread stopped",
+            entity_type="Service",
+            correlation_id=None,
+        )
+        audit_logger.info(
+            EventType.WORKER_STOPPED,
+            "Cache refresh thread stopped",
+            entity_type="Service",
+            correlation_id=None,
+        )
+        audit_logger.info(
+            EventType.WORKER_STOPPED,
+            "Valuation thread stopped",
+            entity_type="Service",
+            correlation_id=None,
+        )

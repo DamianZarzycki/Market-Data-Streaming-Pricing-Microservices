@@ -134,7 +134,7 @@ def count_active_trades(db, book_id) -> int:
         )
         .count()
     )
-    
+
 def has_active_trades(db, book_id) -> bool:
     return db.query(
         exists().where(

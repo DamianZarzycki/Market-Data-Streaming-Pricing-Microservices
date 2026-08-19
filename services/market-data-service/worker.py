@@ -1,15 +1,3 @@
-from shared.trading_shared.db import DBSessionManager
-from shared.trading_shared.enums import (
-    AssetClass,
-    CurveType,
-    EventType,
-    IRSDirection,
-    ServiceStatus,
-    SnapshotType,
-)
-from shared.trading_shared.models import MarketDataCurve, MarketDataSnapshot, MarketDataSpotPrice
-from shared.trading_shared.audit import AuditLogger
-
 import json
 import logging
 import os
@@ -20,6 +8,18 @@ import uuid
 from datetime import datetime, timezone
 
 from market_data_simulator import MarketDataSimulator
+
+from shared.trading_shared.audit import AuditLogger
+from shared.trading_shared.db import DBSessionManager
+from shared.trading_shared.enums import (
+    AssetClass,
+    CurveType,
+    EventType,
+    IRSDirection,
+    ServiceStatus,
+    SnapshotType,
+)
+from shared.trading_shared.models import MarketDataCurve, MarketDataSnapshot, MarketDataSpotPrice
 
 # Each entry is a dict: {id, queue, ip, user_agent, origin, connected_at, messages_sent}
 subscribers = []
@@ -43,6 +43,7 @@ health_stats = {
 batch_size = 30
 
 market_simulator = MarketDataSimulator()
+
 
 def metric_worker():
     global health_stats
@@ -71,6 +72,7 @@ def metric_worker():
                 "last_event_time": local_last_time,
                 "last_symbol": local_last_symbol,
                 "last_asset_type": local_last_asset_type,
+                "is_thread_alive": threading.current_thread().is_alive(),
             }
 
         except Exception as e:
@@ -208,7 +210,11 @@ def update_snapshot(market_tick_data):
 
 def publish_tick_to_stream(market_tick_data):
     with data_lock:
-        subscriber_ids = [subscriber["id"] for subscriber in subscribers]
+        try:
+            subscriber_ids = [subscriber["id"] for subscriber in subscribers]
+        except Exception as e:
+            logging.error(f"Error occurred while publishing tick to stream: {e}")
+            return
         for instrument_data in market_tick_data.values():
             msg = f"data: {json.dumps(instrument_data)}\n\n"
             for subscriber in subscribers:
@@ -220,7 +226,7 @@ def publish_tick_to_stream(market_tick_data):
 
 
 def persist_curves(market_tick_data):
-    """Zapisuje krzywe synchronicznie przed publish — pricing może od razu zrobić get_curve(curve_id)."""
+    """Synchronously saves curves before publish — pricing can immediately call get_curve(curve_id)."""
     curve_records = []
     for _, data in market_tick_data.items():
         if "curve_type" not in data:
@@ -259,7 +265,7 @@ def persist_curves(market_tick_data):
 
 
 def persist_full_snapshot(market_tick_data):
-    """Okresowy FULL snapshot lokalnego stanu rynku → MarketDataSnapshots."""
+    """Periodic FULL snapshot of the local market state → MarketDataSnapshots."""
     snapshot = MarketDataSnapshot(
         event_id=global_event_id,
         snapshot_type=SnapshotType.FULL.value,
@@ -325,7 +331,7 @@ def symbols():
 
 
 def db_worker():
-    """Batchuje tylko spoty. Krzywe są flushowane synchronicznie w persist_curves."""
+    """Batch only spots. Curves are flushed synchronously in persist_curves."""
     buffer = []
     logging.info("DB worker started")
     while True:

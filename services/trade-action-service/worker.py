@@ -155,7 +155,7 @@ def trade_action_handler(data):
                 logging.info(f"Successfully opened trade. (Client ID: {client_request_id})")
 
             elif action_type == ActionType.CLOSE_TRADE.value:
-                trade_id_to_close = data.get("trade_id")
+                trade_id_to_close = data.get("trade_id") or None
                 logging.info(f"Attempting to close trade with ID: {trade_id_to_close}")
 
                 # IDEMPOTENCY check
@@ -245,9 +245,9 @@ def trade_action_handler(data):
                 quantity = float(trade_to_close.quantity)
 
                 if trade_to_close.side == TradeSide.BUY.value or trade_to_close.side == "BUY":
-                    realized_pnl = round((close_price - trade_price) * quantity, 4)
+                    realized_pnl = round((close_price - trade_price) * quantity, 4) or None
                 else:
-                    realized_pnl = round((trade_price - close_price) * quantity, 4)
+                    realized_pnl = round((trade_price - close_price) * quantity, 4) or None
 
                 closing_valuation = Valuation(
                     valuation_id=uuid.uuid4(),

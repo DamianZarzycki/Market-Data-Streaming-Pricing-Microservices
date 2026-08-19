@@ -1,0 +1,7 @@
+# This service runs with its own directory as the working dir (Docker
+# WORKDIR /app + COPY . .), so modules import their siblings directly
+# (e.g. worker.py does `import calculation_service`). "." resolves those
+# siblings; "../.." adds backend/ for the shared `trading_shared` package.
+# Kept per-service so the common module names (worker, app, custom_server)
+# don't collide across services under one flat search path.
+search-path = [".", "../.."]

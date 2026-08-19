@@ -1,0 +1,4 @@
+alembic
+bottle
+psycopg[binary]
+SQLAlchemy

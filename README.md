@@ -1,13 +1,17 @@
 # Market Data & Pricing System
 
 ## 1. System Overview
-A distributed system that simulates real-time stock market data and prices financial instruments based on it. The application consists of three independent microservices that talk to each other in a containerized environment, ensuring background processing and system monitoring.
+A distributed system that simulates real-time market data, generates and books trades, and prices them. Independent microservices run in Docker Compose and share Postgres; live marks and health are kept in per-process memory (see §8).
 
 ## 2. System Architecture
-The system is based on 3 services:
-* **market-data-service (Port: 8001):** Simulates the stock market. It has a background task that constantly creates new price ticks for stocks (EQUITY), bonds (BOND), and currencies (FX).
-* **pricing-service (Port: 8002):** Takes data from the market through an open connection, calculates instrument prices (fair value, present value, forward) on the fly, and saves them in memory.
-* **monitoring-service (Port: 8003):** Checks if the services are working. It runs independently, regularly asking other services for their status, and provides a combined health report for the whole system.
+The stack is a set of independent microservices:
+* **market-data-service (Port: 8001):** Simulates the market. A background worker emits ticks for EQUITY, BOND, FX, OPTION, IRS, and a synthetic `MARKET_INDEX` benchmark. The live book is an in-memory snapshot (`GET /snapshot` / `GET /stream`).
+* **pricing-service (Port: 8002):** Subscribes to the market stream, marks active trades to market (fair value, PnL), and keeps the latest valuations plus book alpha/beta in memory.
+* **monitoring-service (Port: 8003):** Probes every service `/health` and serves a combined `GET /status` envelope from its health cache.
+* **books-service (Port: 8004):** Book master data (create / update / soft-delete).
+* **blotter-service (Port: 8006):** Trade list API. A worker mirrors pricing SSE into an in-memory valuation cache used by list/detail responses.
+* **trade-generation-service (Port: 8007):** Builds random OPEN/CLOSE intentions. Runtime knobs live in an in-memory config seeded from env; `PUT /config` updates them until process restart.
+* **trade-action-service (Port: 8080):** Accepts intentions, persists trades to Postgres, and computes realized PnL on CLOSE.
 
 ## 3. Running the Project
 In the main project folder, run this command:
@@ -43,6 +47,36 @@ We used SSE (Server-Sent Events). It is a one-way connection from the server to 
 
 ## 7. Testing the System
 You can test the system using `curl` commands or by opening the links in a web browser.
+
+## 8. In-memory caches
+
+There is no Redis or shared cache process. Each service keeps dicts in its own
+process memory. A restart of that container wipes them. They are **not**
+persisted to Postgres (except the underlying trades that pricing reloads from
+the DB).
+
+| Service | Store | What it holds | How it is refreshed |
+| --- | --- | --- | --- |
+| market-data | `market_tick_data_state` | Latest tick per instrument | Overwritten every generator cycle; served by `GET /snapshot` and `GET /stream` |
+| pricing | `active_trades_cache` | Active `Trade` rows keyed by `trade_id` (includes `quantity`) | Full reload from DB every **5s** (`cache_refresh_worker`) |
+| pricing | `valuations_store` | Latest valuation dict per trade | Written on every mark-to-market; `GET /valuations` and `/valuation-stream` |
+| pricing | book metrics (`book_returns`, `metrics_store`) | Rolling window of book vs `MARKET_INDEX` returns, latest alpha/beta | Updated on each benchmark tick; window size `BOOK_METRICS_WINDOW` (default 100) |
+| blotter | `valuation_cache` | Up to **20** recent live valuations per trade | Worker appends frames from pricing `/valuation-stream`; list/detail APIs attach `latest_valuation` from here |
+| monitoring | `health_cache` | Last `/health` probe result per service | Probe loop; `GET /status` reads this map |
+
+**Why `active_trades_cache` exists:** pricing must mark every active trade on
+each market tick. Hitting Postgres per tick would stall the SSE loop. Quantity
+used in `fair_value` and unrealized PnL comes from the cached `Trade` row, not
+from trade-generation at pricing time.
+
+**Known gap:** CLOSE in trade-action-service writes the trade as closed in the
+DB but does **not** evict it from `active_trades_cache`. A closed trade can
+keep being priced until the next 5s reload. There is a TODO on the close path
+for cache invalidation.
+
+**Trade-generation config** is also in-process state (`generator_config`):
+seeded from `TRADE_GENERATION_*` env vars at boot, mutated by `PUT /config`.
+That is runtime config, not a market-data cache.
 
 ## 9. Implementation Challenges
 * The biggest architectural challenge was handling concurrency, especially using locks (`threading.Lock`):

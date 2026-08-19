@@ -73,6 +73,9 @@ class ValuationRepository:
     def add(self, valuation):
         self.db_session.add(valuation)
 
+    def add_all(self, valuations):
+        self.db_session.add_all(valuations)
+
     def get_valuations_by_trade_id(self, trade_id, limit=50):
         query = (
             self.db_session.query(Valuation)
@@ -112,6 +115,7 @@ class MarketDataRepository:
             )
             .first()
         )
+        
 
     def get_curve(self, currency, curve_type):
         return (
