@@ -124,6 +124,7 @@ def generate_market_tick():
             "maturity_years": irs_details["maturity_years"],
             "payments_per_year": irs_details["payments_per_year"],
             "direction": irs_details["direction"],
+            "description": irs_details["description"],
         },
         "MARKET_INDEX": {
             "event_id": global_event_id - 5,

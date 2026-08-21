@@ -39,7 +39,7 @@ def snapshot():
         EventType.SNAPSHOT_GENERATED,
         "Market Data service snapshot generated",
         entity_type="Service",
-        correlation_id=None,
+        correlation_id="",
     )
     return market_tick_data_state
 
@@ -90,7 +90,7 @@ if __name__ == "__main__":
         EventType.WORKER_STARTED,
         "Market Worker started",
         entity_type="Service",
-        correlation_id=None,
+        correlation_id="",
     )
     market_thread = threading.Thread(target=worker.market_worker)
     market_thread.daemon = True
@@ -100,7 +100,7 @@ if __name__ == "__main__":
         EventType.WORKER_STARTED,
         "Metric Worker started",
         entity_type="Service",
-        correlation_id=None,
+        correlation_id="",
     )
     metric_thread = threading.Thread(target=worker.metric_worker)
     metric_thread.daemon = True
@@ -110,7 +110,7 @@ if __name__ == "__main__":
         EventType.WORKER_STARTED,
         "Database Worker started",
         entity_type="Service",
-        correlation_id=None,
+        correlation_id="",
     )
     db_thread = threading.Thread(target=worker.db_worker)
     db_thread.daemon = True
@@ -119,6 +119,6 @@ if __name__ == "__main__":
     try:
         app.run(host="0.0.0.0", port=8001, server=ThreadedServer)
     finally:
-        audit_logger.info(EventType.WORKER_STOPPED, "Market Worker stopped", entity_type="Service", correlation_id=None)
-        audit_logger.info(EventType.WORKER_STOPPED, "Metric Worker stopped", entity_type="Service", correlation_id=None)
-        audit_logger.info(EventType.WORKER_STOPPED, "Database Worker stopped", entity_type="Service", correlation_id=None)
+        audit_logger.info(EventType.WORKER_STOPPED, "Market Worker stopped", entity_type="Service", correlation_id="")
+        audit_logger.info(EventType.WORKER_STOPPED, "Metric Worker stopped", entity_type="Service", correlation_id="")
+        audit_logger.info(EventType.WORKER_STOPPED, "Database Worker stopped", entity_type="Service", correlation_id="")

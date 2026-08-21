@@ -84,17 +84,27 @@ class MarketDataSimulator:
 
     def generate_irs_details(self) -> dict:
         self.__irs_currency = random.choice(["USD", "EUR"])
-        self.__irs_notional = random.uniform(1000000, 10000000)
-        self.__irs_fixed_rate = random.uniform(0.03, 0.05)
-        self.__irs_maturity_years = random.uniform(0.1, 0.5)
+        self.__irs_notional = round(random.uniform(1000000, 10000000), 4)
+        self.__irs_fixed_rate = round(random.uniform(0.03, 0.05), 4)
+        self.__irs_maturity_years = round(random.uniform(0.1, 0.5), 2)
         self.__irs_payments_per_year = random.choice([1, 2, 4, 6, 12])
-        self.__irs_direction = random.choice([IRSDirection.PAY_FIXED_RECEIVE_FLOAT.value, IRSDirection.RECEIVE_FIXED_PAY_FLOAT.value])
+        self.__irs_direction = random.choice(
+            [
+                IRSDirection.PAY_FIXED_RECEIVE_FLOAT.value,
+                IRSDirection.RECEIVE_FIXED_PAY_FLOAT.value,
+            ]
+        )
+        self.__irs_description = (
+            f"{self.__irs_currency} {self.__irs_notional} {self.__irs_fixed_rate} "
+            f"{self.__irs_maturity_years} {self.__irs_payments_per_year} {self.__irs_direction}"
+        )
 
         return {
             "currency": self.__irs_currency,
-            "notional": round(self.__irs_notional, 4),
-            "fixed_rate": round(self.__irs_fixed_rate, 4),
-            "maturity_years": round(self.__irs_maturity_years, 2),
+            "notional": self.__irs_notional,
+            "fixed_rate": self.__irs_fixed_rate,
+            "maturity_years": self.__irs_maturity_years,
             "payments_per_year": self.__irs_payments_per_year,
             "direction": self.__irs_direction,
+            "description": self.__irs_description,
         }
