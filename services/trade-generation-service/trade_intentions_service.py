@@ -6,6 +6,7 @@ import random
 import threading
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from typing import TypedDict
 
 from shared.trading_shared.db import DBSessionManager
@@ -26,6 +27,13 @@ class GeneratorState(TypedDict):
 _state_lock = threading.Lock()
 _stop_event = threading.Event()
 _stop_event.set()
+
+_HTTP_POOL = ThreadPoolExecutor(max_workers=3, thread_name_prefix="trade-gen-http")
+_NO_SHARED_CONTEXT = object()
+
+_BOOKS_URL = "http://books-service:8004/books"
+_SYMBOLS_URL = "http://market-data-service:8001/symbols"
+_SNAPSHOT_URL = "http://market-data-service:8001/snapshot"
 
 generator_state: GeneratorState = {
     "is_running": False,
@@ -322,10 +330,11 @@ def generate_and_send_to_trade_action_service_batch(count=None):
     if count is None:
         count = generator_config["batch_size"]
 
+    open_context = _fetch_open_market_context()
     batch_payload = []
 
     for _ in range(count):
-        intention = generate_random_intention()
+        intention = generate_random_intention(open_context=open_context)
         if intention:
             batch_payload.append(intention)
             generator_state["total_generated"] += 1
@@ -412,7 +421,7 @@ def _enrich_open_payload(payload, asset_class, tick):
     return payload
 
 
-def generate_random_intention():
+def generate_random_intention(open_context=_NO_SHARED_CONTEXT):
     try:
         action = generate_open_or_close_trade()
         logging.info(f"Generated action: {action} == {ActionType.CLOSE_TRADE.value}")
@@ -427,13 +436,22 @@ def generate_random_intention():
             action = ActionType.OPEN_TRADE.value
 
         if action == ActionType.OPEN_TRADE.value:
-            return _open_intention_from_http()
+            return _open_intention(open_context)
 
         return None
 
     except Exception as e:
         logging.error(f"CRITICAL ERROR in intention generator: {e}", exc_info=True)
         return None
+
+
+def _open_intention(open_context):
+    """OPEN from a shared batch context, or fetch a fresh one for a single call."""
+    if open_context is _NO_SHARED_CONTEXT:
+        return _open_intention_from_http()
+    if open_context is None:
+        return None
+    return _open_intention_from_context(*open_context)
 
 
 def _close_intention_from_db():
@@ -465,22 +483,38 @@ def _close_intention_from_db():
         return payload
 
 
-def _open_intention_from_http():
+def _fetch_open_market_context():
+    """Fetch books, symbols, and snapshot in parallel. Returns a tuple or None."""
     logging.info(
         "ASKING BOOKS-SERVICE for available books and market-data-service for symbols..."
     )
+    books_future = _HTTP_POOL.submit(fetch_json_once, _BOOKS_URL)
+    symbols_future = _HTTP_POOL.submit(fetch_json_once, _SYMBOLS_URL)
+    snapshot_future = _HTTP_POOL.submit(fetch_json_once, _SNAPSHOT_URL)
+    try:
+        books_response = books_future.result()
+        symbols_response = symbols_future.result()
+        snapshot = snapshot_future.result()
+    except Exception as e:
+        logging.error(f"Failed to fetch OPEN market context: {e}", exc_info=True)
+        return None
 
-    response = fetch_json_once("http://books-service:8004/books")
-    symbols_response = fetch_json_once("http://market-data-service:8001/symbols")
-    snapshot = fetch_json_once("http://market-data-service:8001/snapshot")
-
-    books_data = response.get("books", []) if response else []
+    books_data = books_response.get("books", []) if books_response else []
     symbols_data = symbols_response if symbols_response else {}
-
     logging.info(
         f"Fetched {len(books_data)} books and {len(symbols_data)} asset classes."
     )
+    return books_data, symbols_data, snapshot
 
+
+def _open_intention_from_http():
+    context = _fetch_open_market_context()
+    if context is None:
+        return None
+    return _open_intention_from_context(*context)
+
+
+def _open_intention_from_context(books_data, symbols_data, snapshot):
     if not books_data:
         logging.error(
             "Operation aborted: API returned 0 books. Ensure books are created!"
