@@ -4,6 +4,7 @@ from shared.trading_shared.audit import AuditLogger
 from shared.trading_shared.enums import EntityType, EventType, TradeStatus
 from shared.trading_shared.models import Book, Trade
 from sqlalchemy import exists
+from sqlalchemy.exc import IntegrityError
 
 audit_logger = AuditLogger("books-manager-service")
 
@@ -59,10 +60,6 @@ def create_books_batch(db, books_data: list, created_by=None):
                 f"Missing required fields (name, expected_asset_class) in payload: {data}"
             )
 
-        existing_book = db.query(Book).filter(Book.name == name).first()
-        if existing_book:
-            raise ValueError(f"Book with name '{name}' already exists")
-
         new_book = Book(
             name=name,
             description=description,
@@ -74,7 +71,11 @@ def create_books_batch(db, books_data: list, created_by=None):
         db.add(new_book)
         created_books.append(new_book)
 
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise ValueError("A book with this name already exists")
     audit_logger.info(
         event_type=EventType.DB_CREATE,
         message=f"Created {len(created_books)} new books",
@@ -91,13 +92,6 @@ def update_book(db, book_id, data, updated_by=None):
         return None
 
     if "name" in data:
-        already_existing = (
-            db.query(Book)
-            .filter(Book.name == data["name"], Book.book_id != book_id)
-            .first()
-        )
-        if already_existing:
-            raise ValueError(f"Book with name {data['name']} already exists")
         book.name = data["name"]
 
     if "description" in data:
@@ -114,7 +108,11 @@ def update_book(db, book_id, data, updated_by=None):
     if updated_by is not None:
         book.updated_by = updated_by
 
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise ValueError(f"Book with name '{data.get('name')}' already exists")
     audit_logger.info(
         event_type=EventType.DB_UPDATE,
         message=f"Updated book with id {book_id}",
@@ -142,6 +140,20 @@ def has_active_trades(db, book_id) -> bool:
             Trade.status == TradeStatus.ACTIVE.value,
         )
     ).scalar()
+
+
+def move_trades_to_new_book(db, book_id, new_book_id):
+    """Reparent every trade of `book_id` onto `new_book_id` in one statement.
+
+    A single UPDATE acquires row locks in one scan, so it cannot deadlock
+    against a per-row FOR UPDATE closer the way an unordered ORM loop can
+    (LOCK-2). Callers must already have the book row in the same transaction
+    (lock order: books, then trades, then valuations).
+    """
+    db.query(Trade).filter(Trade.book_id == book_id).update(
+        {Trade.book_id: new_book_id},
+        synchronize_session=False,
+    )
 
 
 def delete_book(db, book_id):

@@ -3,6 +3,7 @@ import queue
 import uuid
 import logging
 import metrics
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from shared.trading_shared.audit import AuditLogger
 from shared.trading_shared.db import DBSessionManager
 from shared.trading_shared.enums import ActionType, AssetClass, EntityType, EventType, TradeSide
@@ -32,16 +33,25 @@ def trade_action_handler(data):
     with DBSessionManager() as db:
         try:
             logging.info(f"Received data from queue: {data}")
+            new_trade_id = None
+            trade_id_to_close = None
+            realized_pnl = None
+            book_id = None
+            asset_class = None
             audit_logger.info(
                 EventType.DB_CREATE,
                 f"Processing trade action: {action_type} for client_request_id: {client_request_id}",
                 entity_type=EntityType.TRADE.value,
                 correlation_id=client_request_id,
                 payload={"action_type": action_type, "client_request_id": client_request_id},
+                db=db,
             )
             metadata_payload = None
             if action_type == ActionType.OPEN_TRADE.value:
-                # IDEMPOTENCY check
+                # Fast-path idempotency read (non-locking). This is only an
+                # optimisation to avoid doing work for an obvious duplicate; the
+                # authoritative guarantee is the INSERT ... ON CONFLICT below,
+                # which is atomic even under concurrent consumers (RACE-2).
                 if client_request_id:
                     existing = db.trades.get_trades(
                         client_request_id=client_request_id, first_only=True
@@ -56,7 +66,9 @@ def trade_action_handler(data):
                             f"Duplicate OPEN_TRADE ignored for client_request_id {client_request_id}",
                             entity_type=EntityType.TRADE.value,
                             correlation_id=client_request_id,
+                            db=db,
                         )
+                        db.commit()
                         metrics.record_duplicate(
                             action_type, client_request_id, symbol, enqueued_at
                         )
@@ -110,6 +122,7 @@ def trade_action_handler(data):
                             f"OPEN_TRADE IRS rejected: missing params {missing_irs} "
                             f"for client_request_id {client_request_id}"
                         )
+                        db.commit()
                         metrics.record_error(
                             action_type,
                             client_request_id,
@@ -135,78 +148,80 @@ def trade_action_handler(data):
                     trade_price = data.get("trade_price")
                     process_note = "trade created"
 
-                new_trade = Trade(
-                    client_request_id=client_request_id,
-                    book_id=book_id,
-                    asset_class=asset_class,
-                    symbol=symbol,
-                    instrument_id=instrument.instrument_id,
-                    side=data.get("side"),
-                    quantity=data.get("quantity"),
-                    trade_price=trade_price,
-                    trade_currency=data.get("currency"),
-                    trade_date=datetime.now(timezone.utc),
-                    status="ACTIVE",
-                    source="GENERATED",
-                    metadata_payload=metadata_payload if metadata_payload else None,
+                now = datetime.now(timezone.utc)
+                trades_table = Trade.__table__
+
+                trade_values = {
+                    "trade_id": uuid.uuid4(),
+                    "client_request_id": client_request_id,
+                    "book_id": book_id,
+                    "asset_class": asset_class,
+                    "symbol": symbol,
+                    "instrument_id": instrument.instrument_id,
+                    "side": data.get("side"),
+                    "quantity": data.get("quantity"),
+                    "trade_price": trade_price,
+                    "trade_currency": data.get("currency"),
+                    "trade_date": now,
+                    "status": "ACTIVE",
+                    "source": "GENERATED",
+                    "metadata": metadata_payload if metadata_payload else None,
+                    "opened_at": now,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+
+                insert_stmt = (
+                    pg_insert(trades_table)
+                    .values(trade_values)
+                    .on_conflict_do_nothing(index_elements=["client_request_id"])
+                    .returning(trades_table.c.trade_id)
                 )
-                logging.info(f"Creating new trade: {new_trade}")
-                db.trades.add(new_trade)
+                inserted = db.session.execute(insert_stmt).first()
+                if inserted is None:
+                    logging.warning(
+                        f"Duplicate OPEN_TRADE ignored (unique conflict): "
+                        f"client_request_id {client_request_id}"
+                    )
+                    audit_logger.warning(
+                        EventType.DB_REJECT,
+                        f"Duplicate OPEN_TRADE ignored for client_request_id {client_request_id}",
+                        entity_type=EntityType.TRADE.value,
+                        correlation_id=client_request_id,
+                        db=db,
+                    )
+                    db.commit()
+                    metrics.record_duplicate(action_type, client_request_id, symbol, enqueued_at)
+                    return
+
+                new_trade_id = inserted[0]
                 logging.info(f"Successfully opened trade. (Client ID: {client_request_id})")
 
             elif action_type == ActionType.CLOSE_TRADE.value:
                 trade_id_to_close = data.get("trade_id") or None
                 logging.info(f"Attempting to close trade with ID: {trade_id_to_close}")
 
-                # IDEMPOTENCY check
-                if client_request_id:
-                    trade = db.trades.get_by_id(trade_id_to_close)
-                    close_req = None
-                    if trade and trade.metadata_payload:
-                        close_req = trade.metadata_payload.get("close_client_request_id")
-                        if hasattr(close_req, "as_string"):
-                            close_req = close_req.as_string()
-                    if trade and close_req == client_request_id:
-                        logging.warning(
-                            f"Duplicate CLOSE_TRADE ignored: client_request_id {client_request_id} "
-                            f"already closed trade {trade_id_to_close}"
-                        )
-                        audit_logger.warning(
-                            EventType.DB_REJECT,
-                            f"Duplicate CLOSE_TRADE ignored for client_request_id {client_request_id}",
-                            entity_type=EntityType.TRADE.value,
-                            correlation_id=client_request_id,
-                        )
-                        metrics.record_duplicate(
-                            action_type, client_request_id, symbol, enqueued_at
-                        )
-                        return
-
-                audit_logger.info(
-                    EventType.DB_CLOSE,
-                    f"Closing trade: {trade_id_to_close}",
-                    entity_type=EntityType.TRADE.value,
-                    entity_id=str(trade_id_to_close),
-                    correlation_id=client_request_id,
-                )
-                # Preventing race conditions by locking the selected trade row
-                # until the transaction is complete.
+                # FOR NO KEY UPDATE waits if another transaction holds the row,
+                # then re-checks status / close_client_request_id under the lock.
                 trade_to_close = (
                     db.session.query(Trade)
                     .filter_by(trade_id=trade_id_to_close)
-                    .with_for_update()
+                    .with_for_update(key_share=True)
                     .first()
                 )
 
                 if not trade_to_close:
                     logging.error(f"Trade not found in database with ID: {trade_id_to_close}")
+                    db.commit()
                     audit_logger.warning(
                         EventType.DB_ERROR,
                         f"CLOSE_TRADE failed: trade {trade_id_to_close} not found",
                         entity_type=EntityType.TRADE.value,
                         entity_id=str(trade_id_to_close),
                         correlation_id=client_request_id,
+                        db=db,
                     )
+                    db.commit()
                     metrics.record_error(
                         action_type,
                         client_request_id,
@@ -216,15 +231,40 @@ def trade_action_handler(data):
                     )
                     return
 
+                close_req = None
+                if client_request_id and trade_to_close.metadata_payload:
+                    close_req = trade_to_close.metadata_payload.get("close_client_request_id")
+                    if hasattr(close_req, "as_string"):
+                        close_req = close_req.as_string()
+                if client_request_id and close_req == client_request_id:
+                    logging.warning(
+                        f"Duplicate CLOSE_TRADE ignored: client_request_id {client_request_id} "
+                        f"already closed trade {trade_id_to_close}"
+                    )
+                    db.commit()
+                    audit_logger.warning(
+                        EventType.DB_REJECT,
+                        f"Duplicate CLOSE_TRADE ignored for client_request_id {client_request_id}",
+                        entity_type=EntityType.TRADE.value,
+                        correlation_id=client_request_id,
+                        db=db,
+                    )
+                    db.commit()
+                    metrics.record_duplicate(action_type, client_request_id, symbol, enqueued_at)
+                    return
+
                 if trade_to_close.status != "ACTIVE":
                     logging.warning(f"Trade {trade_id_to_close} is already closed or inactive.")
+                    db.commit()
                     audit_logger.warning(
                         EventType.DB_REJECT,
                         f"CLOSE_TRADE rejected: trade {trade_id_to_close} is not ACTIVE",
                         entity_type=EntityType.TRADE.value,
                         entity_id=str(trade_id_to_close),
                         correlation_id=client_request_id,
+                        db=db,
                     )
+                    db.commit()
                     metrics.record_error(
                         action_type,
                         client_request_id,
@@ -239,6 +279,10 @@ def trade_action_handler(data):
                 trade_to_close.close_price = data.get("close_price")
                 trade_to_close.close_reason = data.get("close_reason")
                 trade_to_close.closed_at = datetime.now(timezone.utc)
+                if client_request_id:
+                    close_metadata = dict(trade_to_close.metadata_payload or {})
+                    close_metadata["close_client_request_id"] = client_request_id
+                    trade_to_close.metadata_payload = close_metadata
 
                 close_price = float(data.get("close_price"))
                 trade_price = float(trade_to_close.trade_price)
@@ -285,16 +329,19 @@ def trade_action_handler(data):
                 )
                 return
 
+            # Row locks are released here. Audit joins this same session
+            # (LOCK-3) so we never check out a second pooled connection.
             db.commit()
 
             if action_type == ActionType.OPEN_TRADE.value:
                 audit_logger.info(
                     EventType.DB_CREATE,
-                    f"Trade opened: {new_trade.trade_id}",
+                    f"Trade opened: {new_trade_id}",
                     entity_type=EntityType.TRADE.value,
-                    entity_id=str(new_trade.trade_id),
+                    entity_id=str(new_trade_id),
                     correlation_id=client_request_id,
                     payload={"book_id": book_id, "symbol": symbol, "asset_class": asset_class},
+                    db=db,
                 )
             elif action_type == ActionType.CLOSE_TRADE.value:
                 audit_logger.info(
@@ -304,7 +351,9 @@ def trade_action_handler(data):
                     entity_id=str(trade_id_to_close),
                     correlation_id=client_request_id,
                     payload={"close_price": data.get("close_price"), "realized_pnl": realized_pnl},
+                    db=db,
                 )
+            db.commit()
 
             metrics.record_processed(
                 action_type, client_request_id, symbol, process_note, enqueued_at
@@ -313,12 +362,17 @@ def trade_action_handler(data):
         except Exception as e:
             db.rollback()
             logging.error(f"WENT WRONG: {e}")
-            audit_logger.error(
-                EventType.DB_ERROR,
-                f"Trade action failed: {e}",
-                correlation_id=data.get("client_request_id"),
-                payload={"action_type": data.get("action_type"), "error": str(e)},
-            )
+            try:
+                audit_logger.error(
+                    EventType.DB_ERROR,
+                    f"Trade action failed: {e}",
+                    correlation_id=data.get("client_request_id"),
+                    payload={"action_type": data.get("action_type"), "error": str(e)},
+                    db=db,
+                )
+                db.commit()
+            except Exception:
+                logging.exception("Failed to persist error audit")
             metrics.record_error(
                 action_type,
                 client_request_id,

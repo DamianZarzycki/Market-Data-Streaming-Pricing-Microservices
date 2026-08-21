@@ -50,8 +50,7 @@ class TradeRepository:
             query = query.filter(Trade.symbol == symbol)
 
         if first_only:
-            # Row lock only when a single trade is fetched for mutation.
-            return query.with_for_update().first()
+            return query.first()
         _page = int(page) if page is not None else 1
         _limit = int(limit) if limit is not None else 50
         # Read-only listing must not take FOR UPDATE locks — that stalls the blotter UI.

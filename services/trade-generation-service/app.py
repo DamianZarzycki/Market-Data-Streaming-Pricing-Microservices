@@ -1,5 +1,4 @@
 import logging
-import threading
 
 import trade_intentions_service
 import worker
@@ -50,26 +49,18 @@ def generate_multiple():
 
 @app.route("/start", method=["POST"])
 def start_generation():
-    if trade_intentions_service.generator_state["is_running"]:
+    if not trade_intentions_service.start_generator(worker.trade_generation_worker):
         response.status = 400
         return {"message": "Generator is already running!"}
-
-    trade_intentions_service.generator_state["is_running"] = True
-    thread = threading.Thread(target=worker.trade_generation_worker, daemon=True)
-    trade_intentions_service.generator_state["thread"] = thread
-    thread.start()
 
     return {"message": "Generator started successfully."}
 
 
 @app.route("/stop", method=["POST"])
 def stop_generation():
-    if not trade_intentions_service.generator_state["is_running"]:
+    if not trade_intentions_service.stop_generator():
         response.status = 400
         return {"message": "No data available."}
-
-    # TODO Czy to nam daje pewność, że wątek się zatrzyma bez wygenerowanie 'ostatniej' iteracji?
-    trade_intentions_service.generator_state["is_running"] = False
 
     return {"message": "Generator was stopped."}
 

@@ -4,6 +4,7 @@ from bottle import Bottle, request, response  # <-- TUTAJ POPRAWA IMPORTU
 from shared.trading_shared.db import SessionLocal
 from shared.trading_shared.enums import ServiceStatus
 from shared.trading_shared.logging_config import configure_logging
+from sqlalchemy.exc import IntegrityError
 
 import books_manager_service
 
@@ -61,6 +62,11 @@ def create_new_books():
         db.rollback()
         response.status = 409
         return {"error": str(ve)}
+    except IntegrityError as ie:
+        db.rollback()
+        logging.warning("Book create unique constraint: %s", ie)
+        response.status = 409
+        return {"error": "A book with this name already exists"}
     except Exception as e:
         db.rollback()
         logging.error(f"Error creating books: {e}")
@@ -85,6 +91,11 @@ def update_book(book_id):
         db.rollback()
         response.status = 409
         return {"error": str(ve)}
+    except IntegrityError as ie:
+        db.rollback()
+        logging.warning("Book update unique constraint: %s", ie)
+        response.status = 409
+        return {"error": "A book with this name already exists"}
 
     if not book:
         response.status = 404

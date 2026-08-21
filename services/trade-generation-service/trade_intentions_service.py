@@ -19,7 +19,14 @@ class GeneratorState(TypedDict):
     thread: threading.Thread | None
 
 
-# TODO threading event moze? (wait)
+# Check-and-set of is_running is not atomic on ThreadedServer; two POST /start
+# calls can both pass the guard (RACE-3). All start/stop transitions take this
+# lock. _stop_event lets the worker wake immediately on /stop instead of
+# sleeping out the remaining interval.
+_state_lock = threading.Lock()
+_stop_event = threading.Event()
+_stop_event.set()
+
 generator_state: GeneratorState = {
     "is_running": False,
     "total_generated": 0,
@@ -201,6 +208,51 @@ def expected_rate_per_sec():
     return round(1000.0 / interval_ms, 4)
 
 
+def start_generator(target):
+    """Start the generation worker. Returns False if one is already running."""
+    with _state_lock:
+        thread = generator_state["thread"]
+        if generator_state["is_running"] or (thread is not None and thread.is_alive()):
+            return False
+        _stop_event.clear()
+        generator_state["is_running"] = True
+        worker_thread = threading.Thread(target=target, daemon=True)
+        generator_state["thread"] = worker_thread
+        worker_thread.start()
+        return True
+
+
+def stop_generator():
+    """Request the generation worker to stop. Returns False if it was not running."""
+    with _state_lock:
+        thread = generator_state["thread"]
+        if not generator_state["is_running"] and not (
+            thread is not None and thread.is_alive()
+        ):
+            return False
+        generator_state["is_running"] = False
+        _stop_event.set()
+        return True
+
+
+def generator_should_stop():
+    return _stop_event.is_set()
+
+
+def wait_for_stop(timeout_s):
+    """Block until /stop or timeout. Returns True if stop was requested."""
+    return _stop_event.wait(timeout_s)
+
+
+def mark_generator_stopped():
+    with _state_lock:
+        if generator_state["thread"] is not threading.current_thread():
+            return
+        generator_state["is_running"] = False
+        generator_state["thread"] = None
+        _stop_event.set()
+
+
 def update_config(payload):
     """Apply a partial config update. Returns the new config or raises ValueError."""
     if not isinstance(payload, dict) or not payload:
@@ -218,14 +270,24 @@ def update_config(payload):
 # jak constrainy moze wplynac na transakcje DB -> duze tabele i sprawdzanie id w trakcie insertow
 # profiling
 
-@retry(max_attempts=3)
-def fetch_json(url, method="GET", headers=None, data=None):
+def fetch_json(url, method="GET", headers=None, data=None, timeout=5):
     if headers is None:
         headers = {}
 
     req = urllib.request.Request(url, method=method, headers=headers, data=data)
-    with urllib.request.urlopen(req, timeout=5) as response:
+    with urllib.request.urlopen(req, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def fetch_json_once(url, method="GET", headers=None, data=None, timeout=2):
+    """One-shot HTTP JSON fetch. No retry — the generator already loops (TX-2)."""
+    return fetch_json(url, method=method, headers=headers, data=data, timeout=timeout)
+
+
+@retry(max_attempts=3)
+def fetch_json_retry(url, method="GET", headers=None, data=None, timeout=5):
+    return fetch_json(url, method=method, headers=headers, data=data, timeout=timeout)
+
 
 def send_to_trade_action_service(payload):
     if isinstance(payload, list):
@@ -236,7 +298,7 @@ def send_to_trade_action_service(payload):
         message = "single order"
 
     try:
-        fetch_json(
+        fetch_json_retry(
             url,
             method="POST",
             headers={"Content-Type": "application/json"},
@@ -351,126 +413,140 @@ def _enrich_open_payload(payload, asset_class, tick):
 
 
 def generate_random_intention():
+    try:
+        action = generate_open_or_close_trade()
+        logging.info(f"Generated action: {action} == {ActionType.CLOSE_TRADE.value}")
+
+        if action == ActionType.CLOSE_TRADE.value:
+            close_payload = _close_intention_from_db()
+            if close_payload is not None:
+                return close_payload
+            logging.info(
+                "No active trades found. Defaulting to opening a new trade."
+            )
+            action = ActionType.OPEN_TRADE.value
+
+        if action == ActionType.OPEN_TRADE.value:
+            return _open_intention_from_http()
+
+        return None
+
+    except Exception as e:
+        logging.error(f"CRITICAL ERROR in intention generator: {e}", exc_info=True)
+        return None
+
+
+def _close_intention_from_db():
+    """Read active trades in a short session, then return. No HTTP in here (TX-2)."""
     with DBSessionManager() as db:
-        try:
-            action = generate_open_or_close_trade()
-            logging.info(f"Generated action: {action} == {ActionType.CLOSE_TRADE.value}")
-
-            if action == ActionType.CLOSE_TRADE.value:
-                logging.info("Checking for active trades to close...")
-                active_trades = db.trades.get_trades(None, status=TradeStatus.ACTIVE.value, symbol=None)
-
-                if not active_trades:
-                    logging.info(
-                        "No active trades found. Defaulting to opening a new trade."
-                    )
-                    action = ActionType.OPEN_TRADE.value
-                else:
-                    trade_to_close = random.choice(active_trades)
-                    logging.info(f"Found trade. Selected: {trade_to_close}")
-                    logging.info(f"Found trade. Selected ID: {trade_to_close.trade_id}")
-
-                    payload = {
-                        "action_type": ActionType.CLOSE_TRADE.value,
-                        "client_request_id": generate_request_id(),
-                        "trade_id": str(trade_to_close.trade_id),
-                        "close_price": round(
-                            float(trade_to_close.trade_price) * random.uniform(0.98, 1.02),
-                            4,
-                        ),
-                        # TODO what other reasons could it be?
-                        "symbol": trade_to_close.symbol,
-                        "close_reason": "RANDOM_TRADE_OUT",
-                    }
-                    logging.info(f"Success! Generated JSON for closing: {payload}")
-                    return payload
-
-            if action == ActionType.OPEN_TRADE.value:
-                logging.info(
-                    "ASKING BOOKS-SERVICE for available books and market-data-service for symbols..."
-                )
-
-                response = fetch_json("http://books-service:8004/books")
-                symbols_response = fetch_json("http://market-data-service:8001/symbols")
-                snapshot = fetch_json("http://market-data-service:8001/snapshot")
-
-                books_data = response.get("books", []) if response else []
-                symbols_data = symbols_response if symbols_response else {}
-
-                logging.info(
-                    f"Fetched {len(books_data)} books and {len(symbols_data)} asset classes."
-                )
-
-                if not books_data:
-                    logging.error(
-                        "Operation aborted: API returned 0 books. Ensure books are created!"
-                    )
-                    return None
-
-                book = random.choice(books_data)
-                book_asset_class = book.get("expected_asset_class")
-                logging.info(
-                    f"Fetched book {book.get('book_id')} with asset class {book_asset_class}."
-                )
-
-                # Books may use legacy/alias names (e.g. EUROPEAN_OPTION) while
-                # market-data catalogs under AssetClass enum values (OPTION).
-                _ASSET_CLASS_ALIASES = {
-                    "EUROPEAN_OPTION": AssetClass.OPTION.value,
-                    "EUROPEAN_OPTIONS": AssetClass.OPTION.value,
-                }
-                lookup_class = _ASSET_CLASS_ALIASES.get(
-                    book_asset_class, book_asset_class
-                )
-                available_symbols = symbols_data.get(lookup_class, [])
-                if not available_symbols and lookup_class != book_asset_class:
-                    available_symbols = symbols_data.get(book_asset_class, [])
-
-                if not available_symbols:
-                    logging.error(
-                        f"Operation aborted: Market Data has no symbols for asset class {book_asset_class}."
-                    )
-                    return None
-
-                symbol = random.choice(available_symbols)
-                logging.info(f"Generated symbol: {symbol}")
-
-                payload = {
-                    "action_type": ActionType.OPEN_TRADE.value,
-                    "client_request_id": generate_request_id(),
-                    "book_id": book.get("book_id"),
-                    "asset_class": book_asset_class,
-                    "symbol": symbol,
-                    "side": random.choice([TradeSide.BUY.value, TradeSide.SELL.value]),
-                    "quantity": random.randint(
-                        generator_config["qty_min"],
-                        generator_config["qty_max"],
-                    ),
-                    "trade_price": round(
-                        random.uniform(
-                            generator_config["price_min"],
-                            generator_config["price_max"],
-                        ),
-                        4,
-                    ),
-                    "currency": "USD",
-                }
-                tick = _tick_for_symbol(snapshot, symbol, lookup_class)
-                payload = _enrich_open_payload(payload, lookup_class, tick)
-                if lookup_class == AssetClass.IRS.value:
-                    missing = [
-                        key
-                        for key in IRS_REQUIRED_FIELDS
-                        if payload.get(key) is None
-                    ]
-                    if missing:
-                        logging.error(
-                            f"Operation aborted: IRS tick missing {missing} for {symbol}."
-                        )
-                        return None
-                logging.info(f"Success! Generated JSON for opening: {payload}")
-                return payload
-
-        except Exception as e:
-            logging.error(f"CRITICAL ERROR in intention generator: {e}", exc_info=True)
+        logging.info("Checking for active trades to close...")
+        active_trades = db.trades.get_trades(
+            None, status=TradeStatus.ACTIVE.value, symbol=None
+        )
+        if not active_trades:
             return None
+
+        trade_to_close = random.choice(active_trades)
+        logging.info(f"Found trade. Selected: {trade_to_close}")
+        logging.info(f"Found trade. Selected ID: {trade_to_close.trade_id}")
+
+        payload = {
+            "action_type": ActionType.CLOSE_TRADE.value,
+            "client_request_id": generate_request_id(),
+            "trade_id": str(trade_to_close.trade_id),
+            "close_price": round(
+                float(trade_to_close.trade_price) * random.uniform(0.98, 1.02),
+                4,
+            ),
+            "symbol": trade_to_close.symbol,
+            "close_reason": "RANDOM_TRADE_OUT",
+        }
+        logging.info(f"Success! Generated JSON for closing: {payload}")
+        return payload
+
+
+def _open_intention_from_http():
+    logging.info(
+        "ASKING BOOKS-SERVICE for available books and market-data-service for symbols..."
+    )
+
+    response = fetch_json_once("http://books-service:8004/books")
+    symbols_response = fetch_json_once("http://market-data-service:8001/symbols")
+    snapshot = fetch_json_once("http://market-data-service:8001/snapshot")
+
+    books_data = response.get("books", []) if response else []
+    symbols_data = symbols_response if symbols_response else {}
+
+    logging.info(
+        f"Fetched {len(books_data)} books and {len(symbols_data)} asset classes."
+    )
+
+    if not books_data:
+        logging.error(
+            "Operation aborted: API returned 0 books. Ensure books are created!"
+        )
+        return None
+
+    book = random.choice(books_data)
+    book_asset_class = book.get("expected_asset_class")
+    logging.info(
+        f"Fetched book {book.get('book_id')} with asset class {book_asset_class}."
+    )
+
+    # Books may use legacy/alias names (e.g. EUROPEAN_OPTION) while
+    # market-data catalogs under AssetClass enum values (OPTION).
+    _ASSET_CLASS_ALIASES = {
+        "EUROPEAN_OPTION": AssetClass.OPTION.value,
+        "EUROPEAN_OPTIONS": AssetClass.OPTION.value,
+    }
+    lookup_class = _ASSET_CLASS_ALIASES.get(
+        book_asset_class, book_asset_class
+    )
+    available_symbols = symbols_data.get(lookup_class, [])
+    if not available_symbols and lookup_class != book_asset_class:
+        available_symbols = symbols_data.get(book_asset_class, [])
+
+    if not available_symbols:
+        logging.error(
+            f"Operation aborted: Market Data has no symbols for asset class {book_asset_class}."
+        )
+        return None
+
+    symbol = random.choice(available_symbols)
+    logging.info(f"Generated symbol: {symbol}")
+
+    payload = {
+        "action_type": ActionType.OPEN_TRADE.value,
+        "client_request_id": generate_request_id(),
+        "book_id": book.get("book_id"),
+        "asset_class": book_asset_class,
+        "symbol": symbol,
+        "side": random.choice([TradeSide.BUY.value, TradeSide.SELL.value]),
+        "quantity": random.randint(
+            generator_config["qty_min"],
+            generator_config["qty_max"],
+        ),
+        "trade_price": round(
+            random.uniform(
+                generator_config["price_min"],
+                generator_config["price_max"],
+            ),
+            4,
+        ),
+        "currency": "USD",
+    }
+    tick = _tick_for_symbol(snapshot, symbol, lookup_class)
+    payload = _enrich_open_payload(payload, lookup_class, tick)
+    if lookup_class == AssetClass.IRS.value:
+        missing = [
+            key
+            for key in IRS_REQUIRED_FIELDS
+            if payload.get(key) is None
+        ]
+        if missing:
+            logging.error(
+                f"Operation aborted: IRS tick missing {missing} for {symbol}."
+            )
+            return None
+    logging.info(f"Success! Generated JSON for opening: {payload}")
+    return payload
