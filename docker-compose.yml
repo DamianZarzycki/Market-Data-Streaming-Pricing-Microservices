@@ -39,7 +39,7 @@ services:
     volumes:
       - ./shared:/app/shared
     environment:
-      - TICK_INTERVAL_MS=300
+      - TICK_INTERVAL_MS=1500
       - DATABASE_URL=${DATABASE_URL}
     depends_on: *depends-on-db
   pricing-service:
@@ -94,6 +94,18 @@ services:
       - TRADE_GENERATION_QTY_MAX=${TRADE_GENERATION_QTY_MAX:-1000}
       - TRADE_GENERATION_PRICE_MIN=${TRADE_GENERATION_PRICE_MIN:-50}
       - TRADE_GENERATION_PRICE_MAX=${TRADE_GENERATION_PRICE_MAX:-150}
+    depends_on: *depends-on-db
+  market-data-service-integration:
+    build: ./services/market-data-service-integration
+    ports:
+      - "8005:8005"
+    volumes:
+      - ./shared:/app/shared
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - FINNHUB_API_KEY=${FINNHUB_API_KEY}
+      - TWELVEDATA_API_KEY=${TWELVEDATA_API_KEY}
+      - ALPHAVANTAGE_API_KEY=${ALPHAVANTAGE_API_KEY}
     depends_on: *depends-on-db
   trade-action-service:
     build: ./services/trade-action-service
