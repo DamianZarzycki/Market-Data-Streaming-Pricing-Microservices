@@ -3,6 +3,7 @@ from shared.trading_shared.models import (
     AuditLog,
     Instrument,
     MarketDataCurve,
+    MarketDataProviderQuote,
     MarketDataSpotPrice,
     Trade,
     Valuation,
@@ -129,4 +130,23 @@ class MarketDataRepository:
     def add_all(self, market_data_list):
         logging.info(f"Attempt to add {len(market_data_list)} market data records to DB")
         self.db_session.add_all(market_data_list)
+
+
+class MarketDataProviderQuoteRepository:
+    def __init__(self, db_session):
+        self.db_session = db_session
+
+    def add(self, quote: MarketDataProviderQuote):
+        self.db_session.add(quote)
+
+    def get_latest(self, provider, symbol):
+        return (
+            self.db_session.query(MarketDataProviderQuote)
+            .filter(
+                MarketDataProviderQuote.provider == provider,
+                MarketDataProviderQuote.symbol == symbol,
+            )
+            .order_by(MarketDataProviderQuote.received_at.desc())
+            .first()
+        )
 

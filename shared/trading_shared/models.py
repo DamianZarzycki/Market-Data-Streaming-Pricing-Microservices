@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import Column, Text, Boolean, DateTime, Numeric, ForeignKey, BigInteger
+from sqlalchemy import Column, Text, Boolean, DateTime, Numeric, ForeignKey, BigInteger, Index
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import declarative_base
 
@@ -88,6 +88,22 @@ class Valuation(Base):
     valuation_payload = Column(JSONB, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
 
+
+class MarketDataProviderQuote(Base):
+    __tablename__ = "market_data_provider_quotes"
+
+    quote_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    provider = Column(Text, nullable=False)
+    asset_class = Column(Text, nullable=False)
+    symbol = Column(Text, nullable=False)
+    bid = Column(Numeric, nullable=True)
+    ask = Column(Numeric, nullable=True)
+    last = Column(Numeric, nullable=True)
+    currency = Column(Text, nullable=True)
+    provider_timestamp = Column(DateTime(timezone=True), nullable=True)
+    received_at = Column(DateTime(timezone=True), nullable=False)
+    raw_payload = Column(JSONB, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
 
 class MarketDataSpotPrice(Base):
     __tablename__ = "market_data_spot_prices"
