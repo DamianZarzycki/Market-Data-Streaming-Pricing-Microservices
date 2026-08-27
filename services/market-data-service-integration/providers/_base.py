@@ -12,5 +12,13 @@ class BaseProvider(ABC):
     #     pass
 
     @abstractmethod
+    def normalize_data(self, data, symbol) -> dict:
+        pass
+
+    @abstractmethod
     def fetch_data(self, symbol: str):
+        pass
+
+    @abstractmethod
+    def health(self):
         pass
