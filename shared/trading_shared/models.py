@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import Column, Text, Boolean, DateTime, Numeric, ForeignKey, BigInteger, Index
+from sqlalchemy import Column, Text, Boolean, DateTime, Numeric, ForeignKey, BigInteger, Index, Integer
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import declarative_base
 
@@ -88,6 +88,30 @@ class Valuation(Base):
     valuation_payload = Column(JSONB, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
 
+class MarketDataProviderLimits(Base):
+    __tablename__ = "market_data_provider_limits"
+
+    provider = Column(Text, primary_key=True)
+    minute_limit = Column(Integer, nullable=True)
+    hourly_limit = Column(Integer, nullable=True)
+    daily_limit = Column(Integer, nullable=True)
+    monthly_limit = Column(Integer, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+
+class MarketDataProviderRequest(Base):
+    __tablename__ = "market_data_provider_requests"
+
+    request_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    provider = Column(Text, nullable=False)
+    symbol = Column(Text, nullable=True)
+    requested_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+    __table_args__ = (
+        Index("ix_provider_requests_provider_requested_at", "provider", "requested_at"),
+    )
+
 
 class MarketDataProviderQuote(Base):
     __tablename__ = "market_data_provider_quotes"
@@ -136,8 +160,9 @@ class MarketDataCurve(Base):
     currency = Column(Text, nullable=True)
     tenors = Column(JSONB, nullable=False)  # e.g. ["1M", "3M", "1Y", "5Y"]
     rates = Column(JSONB, nullable=False)  # e.g. [0.041, 0.042, 0.044, 0.047]
-    event_time = Column(DateTime(timezone=True), nullable=False)
+    as_of_time = Column(DateTime(timezone=True), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    provider = Column(Text, nullable=False)
     raw_payload = Column(JSONB, nullable=False)
 
 

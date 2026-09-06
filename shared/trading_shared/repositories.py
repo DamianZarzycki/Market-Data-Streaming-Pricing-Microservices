@@ -3,7 +3,9 @@ from shared.trading_shared.models import (
     AuditLog,
     Instrument,
     MarketDataCurve,
+    MarketDataProviderLimits,
     MarketDataProviderQuote,
+    MarketDataProviderRequest,
     MarketDataSpotPrice,
     Trade,
     Valuation,
@@ -132,6 +134,29 @@ class MarketDataRepository:
         self.db_session.add_all(market_data_list)
 
 
+class MarketDataProviderLimitsRepository:
+    def __init__(self, db_session):
+        self.db_session = db_session
+
+    def list_all(self):
+        return self.db_session.query(MarketDataProviderLimits).all()
+
+
+class MarketDataProviderRequestRepository:
+    def __init__(self, db_session):
+        self.db_session = db_session
+
+    def add(self, request: MarketDataProviderRequest):
+        self.db_session.add(request)
+
+    def list_since(self, since):
+        return (
+            self.db_session.query(MarketDataProviderRequest)
+            .filter(MarketDataProviderRequest.requested_at >= since)
+            .all()
+        )
+
+
 class MarketDataProviderQuoteRepository:
     def __init__(self, db_session):
         self.db_session = db_session
@@ -148,5 +173,20 @@ class MarketDataProviderQuoteRepository:
             )
             .order_by(MarketDataProviderQuote.received_at.desc())
             .first()
+        )
+
+    def get_latest_for_symbol(self, symbol, asset_class):
+        return (
+            self.db_session.query(MarketDataProviderQuote)
+            .filter(
+                MarketDataProviderQuote.symbol == symbol,
+                MarketDataProviderQuote.asset_class == asset_class,
+            )
+            .distinct(MarketDataProviderQuote.provider)
+            .order_by(
+                MarketDataProviderQuote.provider,
+                MarketDataProviderQuote.received_at.desc(),
+            )
+            .all()
         )
 

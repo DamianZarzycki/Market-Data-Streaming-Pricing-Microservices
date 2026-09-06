@@ -2,7 +2,9 @@ import os
 from shared.trading_shared.repositories import (
     AuditRepository,
     InstrumentRepository,
+    MarketDataProviderLimitsRepository,
     MarketDataProviderQuoteRepository,
+    MarketDataProviderRequestRepository,
     MarketDataRepository,
     TradeRepository,
     ValuationRepository,
@@ -33,6 +35,8 @@ class DBSessionManager:
         self.instruments = InstrumentRepository(self.session)
         self.market_data = MarketDataRepository(self.session)
         self.provider_quotes = MarketDataProviderQuoteRepository(self.session)
+        self.provider_limits = MarketDataProviderLimitsRepository(self.session)
+        self.provider_requests = MarketDataProviderRequestRepository(self.session)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
