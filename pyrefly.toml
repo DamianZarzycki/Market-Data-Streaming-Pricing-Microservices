@@ -1,0 +1,4 @@
+# Shared package + Alembic live under backend/. Services keep their own
+# pyrefly.toml so sibling modules (worker, app, custom_server) do not collide.
+search-path = ["."]
+python-interpreter-path = ".venv/bin/python"

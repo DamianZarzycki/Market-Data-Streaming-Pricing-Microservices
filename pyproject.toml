@@ -16,32 +16,3 @@ dependencies = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["shared*"]
-
-[tool.ruff]
-line-length = 100
-target-version = "py311"
-
-# Paths to exclude from linting/formatting
-exclude = [
-    ".git",
-    "__pycache__",
-    "db/migrations",
-]
-
-[tool.ruff.lint]
-select = [
-    "E",   # pycodestyle errors
-    "F",   # pyflakes (undefined names, unused imports, etc.)
-    "I",   # isort (import ordering)
-    "W",   # pycodestyle warnings
-]
-ignore = [
-    "E501", # line too long — handled by formatter
-]
-
-[tool.ruff.lint.isort]
-known-first-party = ["shared"]
-
-[tool.ruff.format]
-quote-style = "double"
-indent-style = "space"

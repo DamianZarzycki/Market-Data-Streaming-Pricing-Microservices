@@ -1,17 +1,31 @@
+import asyncio
 import logging
-from datetime import datetime, timezone
-from providers._base import BaseProvider
+import json
 import os
 from urllib import request as urllib_request
-import json
+from datetime import datetime, timezone
+from providers.quota_providers._base import BaseProvider, ProviderAPIError
 
 api_key: str = os.getenv("FINNHUB_API_KEY") or ""
 
     
 class FinnhubProvider(BaseProvider):
+    key = "finnhub"
+    semaphore_limit = 1
+
     def __init__(self):
         super().__init__(api_key)
         self.url = "https://finnhub.io/api/v1/quote?symbol={symbol}&token={api_key}"
+
+    def request_headers(self) -> dict:
+        return {"X-Finnhub-Token": self.api_key}
+
+    def provider_error(self, data) -> ProviderAPIError | None:
+        if not isinstance(data, dict):
+            return ProviderAPIError("invalid Finnhub response")
+        if data.get("error"):
+            return ProviderAPIError(str(data["error"]))
+        return None
 
     def health(self):
         # easiest/cheapest api call to check if the provider is healthy
@@ -50,3 +64,4 @@ class FinnhubProvider(BaseProvider):
 
         with urllib_request.urlopen(req) as response:
             return json.loads(response.read().decode())
+
