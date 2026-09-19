@@ -15,8 +15,7 @@ class ActionType(str, Enum):
 
 class TradeSource(str, Enum):
     GENERATED = "GENERATED"
-    MANUAL = "MANUAL"
-    SYSTEM = "SYSTEM"
+    TRADING_TICKET = "TRADING_TICKET"
 
 class CurveType(str, Enum):
     YIELD_CURVE = "YIELD_CURVE"

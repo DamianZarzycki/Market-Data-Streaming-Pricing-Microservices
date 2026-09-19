@@ -60,6 +60,9 @@ class Trade(Base):
     close_price = Column(Numeric, nullable=True)
     close_reason = Column(Text, nullable=True)
     source = Column(Text, nullable=False)  # GENERATED / MANUAL / SYSTEM
+    market_data_provider = Column(Text, nullable=True)
+    reference_price = Column(Numeric, nullable=True)
+    reference_price_timestamp = Column(DateTime(timezone=True), nullable=True)
     client_request_id = Column(Text, nullable=True, unique=True)
     metadata_payload = Column(
         "metadata", JSONB, nullable=True
