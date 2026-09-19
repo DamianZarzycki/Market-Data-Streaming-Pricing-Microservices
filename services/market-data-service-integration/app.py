@@ -8,9 +8,10 @@ from bottle import Bottle
 from custom_server import ThreadedServer
 from core.curve_service import CurveService
 from core.fetch_audit import snapshot
+from core.poll_workers import PollWorkers
 from core.quote_service import QuoteService
-from providers.limits.market_data_providers_limits import load_providers_limits
 from core.request_tracker import RequestTracker
+from providers.limits.market_data_providers_limits import load_providers_limits
 from routes import register_routes
 from shared.trading_shared.audit import AuditLogger
 from shared.trading_shared.enums import EventType
@@ -19,6 +20,7 @@ app = Bottle()
 audit_logger = AuditLogger("market-data-service-integration")
 _quote_service: QuoteService | None = None
 _curve_service: CurveService | None = None
+_poll_workers: PollWorkers | None = None
 
 
 def quote_service() -> QuoteService:
@@ -33,7 +35,13 @@ def curve_service() -> CurveService:
     return _curve_service
 
 
-register_routes(app, quote_service, curve_service, snapshot)
+def poll_workers() -> PollWorkers:
+    if _poll_workers is None:
+        raise RuntimeError("Poll workers not initialized")
+    return _poll_workers
+
+
+register_routes(app, quote_service, curve_service, snapshot, poll_workers)
 
 # GET /health
 # GET /providers/<provider>/health
@@ -44,8 +52,7 @@ register_routes(app, quote_service, curve_service, snapshot)
 # GET /market-data/stream/<provider>
 # GET /curves
 # GET /curves/<provider>
-# POST /market-data/refresh
-# POST /curves/refresh
+# GET /market-data/refresh
 
 if __name__ == "__main__":
     audit_logger.info(
@@ -84,10 +91,40 @@ if __name__ == "__main__":
 
     _quote_service = QuoteService.create(tracker, worker.db_queue)
     _curve_service = CurveService.create()
+    _poll_workers = PollWorkers(_quote_service, _curve_service)
+    _poll_workers.start()
+
+    audit_logger.info(
+        EventType.WORKER_STARTED,
+        "Quota poll worker started",
+        entity_type="Service",
+        correlation_id="",
+    )
+    audit_logger.info(
+        EventType.WORKER_STARTED,
+        "Curve poll worker started",
+        entity_type="Service",
+        correlation_id="",
+    )
 
     try:
         app.run(host="0.0.0.0", port=8005, server=ThreadedServer)
     finally:
+        if _poll_workers is not None:
+            _poll_workers.stop()
+            _poll_workers.join(timeout=_poll_workers.interval_seconds + 2)
+            audit_logger.info(
+                EventType.WORKER_STOPPED,
+                "Quota poll worker stopped",
+                entity_type="Service",
+                correlation_id="",
+            )
+            audit_logger.info(
+                EventType.WORKER_STOPPED,
+                "Curve poll worker stopped",
+                entity_type="Service",
+                correlation_id="",
+            )
         audit_worker.stop()
         audit_thread.join(timeout=audit_worker.FLUSH_INTERVAL_SECONDS + 2)
         audit_logger.info(
@@ -110,7 +147,7 @@ if __name__ == "__main__":
         )
         audit_logger.info(
             EventType.WORKER_STOPPED,
-            "Poll worker stopped",
+            "Poll workers stopped",
             entity_type="Service",
             correlation_id="",
         )
