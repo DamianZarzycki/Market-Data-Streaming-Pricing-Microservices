@@ -307,6 +307,7 @@ def recalculate_valuations(tick):
     # The benchmark index is not a tradable instrument: it only drives the
     # book-level alpha/beta computation, acting as the sampling clock.
     if asset_type == AssetClass.BENCHMARK.value:
+        # TODO If data comes from external, we dont have tick for this generated
         book_metrics_service.on_benchmark_tick(tick)
         return
 
