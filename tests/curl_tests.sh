@@ -18,6 +18,7 @@ BOOKS="http://localhost:8004"
 BLOTTER="http://localhost:8006"
 TRADE_GEN="http://localhost:8007"
 TRADE_ACTION="http://localhost:8080"
+MARKET_DATA_INTEGRATION="http://localhost:8005"
 
 # ── Counters ──────────────────────────────────────────────────────────────────
 PASS=0
@@ -204,6 +205,22 @@ check_status "GET /snapshot" "200" "$HTTP_STATUS"
 # =============================================================================
 section "PHASE 4 — Trade Action Service"
 
+# OPEN_TRADE now requires a current provider quote. Use a symbol that the
+# market-data-service-integration polling universe actually covers (see
+# MARKET_DATA_SYMBOLS in docker-compose.yml) — the blotter's simulated
+# $EQUITY_SYMBOL isn't a real quoted instrument and would always be "stale".
+TRADE_ACTION_SYMBOL="AAPL"
+
+# Trigger an immediate poll and give the async DB writer a moment to persist it.
+echo "--- GET /market-data/refresh (seed a fresh provider quote) ---"
+curl_get "$MARKET_DATA_INTEGRATION/market-data/refresh"
+check_status "GET /market-data/refresh" "200" "$HTTP_STATUS"
+echo "  Waiting 2s for quote to be persisted..."
+sleep 2
+
+MARKET_DATA_PROVIDER="FINNHUB"
+REFERENCE_PRICE_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
 CLIENT_REQ_ID_OPEN="req-test-open-$(date +%s)"
 
 echo "--- POST /trade-actions (OPEN_TRADE) ---"
@@ -212,11 +229,15 @@ curl_post "$TRADE_ACTION/trade-actions" "{
   \"client_request_id\": \"$CLIENT_REQ_ID_OPEN\",
   \"book_id\": \"$BOOK_ID\",
   \"asset_class\": \"EQUITY\",
-  \"symbol\": \"$EQUITY_SYMBOL\",
+  \"symbol\": \"$TRADE_ACTION_SYMBOL\",
   \"side\": \"BUY\",
   \"quantity\": 100,
   \"trade_price\": 150.00,
-  \"currency\": \"USD\"
+  \"currency\": \"USD\",
+  \"market_data_provider\": \"$MARKET_DATA_PROVIDER\",
+  \"reference_price\": 150.00,
+  \"reference_price_timestamp\": \"$REFERENCE_PRICE_TIMESTAMP\",
+  \"source\": \"TRADING_TICKET\"
 }"
 check_status "POST /trade-actions (OPEN_TRADE)" "202" "$HTTP_STATUS"
 
@@ -224,8 +245,8 @@ echo "  Waiting 3s for async trade creation..."
 sleep 3
 
 echo "--- GET /trades (blotter) to capture TRADE_ID ---"
-curl_get "$BLOTTER/trades?symbol=$EQUITY_SYMBOL&status=ACTIVE&limit=1"
-check_status "GET /trades?symbol=$EQUITY_SYMBOL&status=ACTIVE" "200" "$HTTP_STATUS"
+curl_get "$BLOTTER/trades?symbol=$TRADE_ACTION_SYMBOL&status=ACTIVE&limit=1"
+check_status "GET /trades?symbol=$TRADE_ACTION_SYMBOL&status=ACTIVE" "200" "$HTTP_STATUS"
 
 TRADE_ID=$(cat /tmp/curl_body.json | jq -r '.trades[0].trade_id // empty')
 if [[ -z "$TRADE_ID" ]]; then
@@ -244,7 +265,7 @@ if [[ -n "$TRADE_ID" ]]; then
     \"client_request_id\": \"$CLIENT_REQ_ID_CLOSE\",
     \"trade_id\": \"$TRADE_ID\",
     \"close_price\": 155.00,
-    \"symbol\": \"$EQUITY_SYMBOL\",
+    \"symbol\": \"$TRADE_ACTION_SYMBOL\",
     \"close_reason\": \"MANUAL\"
   }"
   check_status "POST /trade-actions (CLOSE_TRADE)" "202" "$HTTP_STATUS"
@@ -259,22 +280,30 @@ curl_post "$TRADE_ACTION/trade-actions/batch" "[
     \"client_request_id\": \"req-batch-1-$(date +%s)\",
     \"book_id\": \"$BOOK_ID\",
     \"asset_class\": \"EQUITY\",
-    \"symbol\": \"$EQUITY_SYMBOL\",
+    \"symbol\": \"$TRADE_ACTION_SYMBOL\",
     \"side\": \"SELL\",
     \"quantity\": 50,
     \"trade_price\": 148.50,
-    \"currency\": \"USD\"
+    \"currency\": \"USD\",
+    \"market_data_provider\": \"$MARKET_DATA_PROVIDER\",
+    \"reference_price\": 148.50,
+    \"reference_price_timestamp\": \"$REFERENCE_PRICE_TIMESTAMP\",
+    \"source\": \"TRADING_TICKET\"
   },
   {
     \"action_type\": \"OPEN_TRADE\",
     \"client_request_id\": \"req-batch-2-$(date +%s)\",
     \"book_id\": \"$BOOK_ID\",
     \"asset_class\": \"EQUITY\",
-    \"symbol\": \"$EQUITY_SYMBOL\",
+    \"symbol\": \"$TRADE_ACTION_SYMBOL\",
     \"side\": \"BUY\",
     \"quantity\": 200,
     \"trade_price\": 152.75,
-    \"currency\": \"USD\"
+    \"currency\": \"USD\",
+    \"market_data_provider\": \"$MARKET_DATA_PROVIDER\",
+    \"reference_price\": 152.75,
+    \"reference_price_timestamp\": \"$REFERENCE_PRICE_TIMESTAMP\",
+    \"source\": \"GENERATED\"
   }
 ]"
 check_status "POST /trade-actions/batch" "202" "$HTTP_STATUS"
@@ -292,6 +321,38 @@ curl_post "$TRADE_ACTION/trade-actions" '{
   "client_request_id": "req-bad-action"
 }'
 check_status "POST /trade-actions (bad action_type → 400)" "400" "$HTTP_STATUS"
+
+echo "--- POST /trade-actions (OPEN_TRADE missing reference price fields → 400) ---"
+curl_post "$TRADE_ACTION/trade-actions" "{
+  \"action_type\": \"OPEN_TRADE\",
+  \"client_request_id\": \"req-missing-quote-fields-$(date +%s)\",
+  \"book_id\": \"$BOOK_ID\",
+  \"asset_class\": \"EQUITY\",
+  \"symbol\": \"$TRADE_ACTION_SYMBOL\",
+  \"side\": \"BUY\",
+  \"quantity\": 10,
+  \"trade_price\": 150.00,
+  \"currency\": \"USD\"
+}"
+check_status "POST /trade-actions (missing quote fields → 400)" "400" "$HTTP_STATUS"
+
+echo "--- POST /trade-actions (OPEN_TRADE with unknown/stale provider → 400) ---"
+curl_post "$TRADE_ACTION/trade-actions" "{
+  \"action_type\": \"OPEN_TRADE\",
+  \"client_request_id\": \"req-stale-quote-$(date +%s)\",
+  \"book_id\": \"$BOOK_ID\",
+  \"asset_class\": \"EQUITY\",
+  \"symbol\": \"$TRADE_ACTION_SYMBOL\",
+  \"side\": \"BUY\",
+  \"quantity\": 10,
+  \"trade_price\": 150.00,
+  \"currency\": \"USD\",
+  \"market_data_provider\": \"NO_SUCH_PROVIDER\",
+  \"reference_price\": 150.00,
+  \"reference_price_timestamp\": \"$REFERENCE_PRICE_TIMESTAMP\",
+  \"source\": \"TRADING_TICKET\"
+}"
+check_status "POST /trade-actions (stale/missing provider quote → 400)" "400" "$HTTP_STATUS"
 
 echo "--- POST /trade-actions/batch (non-list payload → 400) ---"
 curl_post "$TRADE_ACTION/trade-actions/batch" '{"action_type": "OPEN_TRADE"}'

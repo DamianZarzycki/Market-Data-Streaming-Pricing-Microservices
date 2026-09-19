@@ -6,11 +6,38 @@ import metrics
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from shared.trading_shared.audit import AuditLogger
 from shared.trading_shared.db import DBSessionManager
-from shared.trading_shared.enums import ActionType, AssetClass, EntityType, EventType, TradeSide
+from shared.trading_shared.enums import (
+    ActionType,
+    AssetClass,
+    EntityType,
+    EventType,
+    TradeSide,
+    TradeSource,
+)
 from shared.trading_shared.models import Instrument, Trade, Valuation
 
 trade_queue = queue.Queue(maxsize=metrics.QUEUE_MAXSIZE)
 audit_logger = AuditLogger("trade-action-service")
+
+
+def _normalize_trade_source(source_value):
+    """Validate the caller-supplied `source` against the known values
+    (TradeSource.TRADING_TICKET / TradeSource.GENERATED). Falls back to
+    GENERATED to preserve the pre-existing default behavior."""
+    normalized = (source_value or "").strip().upper()
+    if normalized in (TradeSource.TRADING_TICKET.value, TradeSource.GENERATED.value):
+        return normalized
+    return TradeSource.GENERATED.value
+
+
+def _parse_reference_timestamp(value):
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        logging.warning(f"Could not parse reference_price_timestamp: {value}")
+        return None
 
 
 def trade_action_worker():
@@ -164,7 +191,12 @@ def trade_action_handler(data):
                     "trade_currency": data.get("currency"),
                     "trade_date": now,
                     "status": "ACTIVE",
-                    "source": "GENERATED",
+                    "source": _normalize_trade_source(data.get("source")),
+                    "market_data_provider": data.get("market_data_provider"),
+                    "reference_price": data.get("reference_price"),
+                    "reference_price_timestamp": _parse_reference_timestamp(
+                        data.get("reference_price_timestamp")
+                    ),
                     "metadata": metadata_payload if metadata_payload else None,
                     "opened_at": now,
                     "created_at": now,
@@ -340,7 +372,19 @@ def trade_action_handler(data):
                     entity_type=EntityType.TRADE.value,
                     entity_id=str(new_trade_id),
                     correlation_id=client_request_id,
-                    payload={"book_id": book_id, "symbol": symbol, "asset_class": asset_class},
+                    payload={
+                        "book_id": book_id,
+                        "symbol": symbol,
+                        "asset_class": asset_class,
+                        "source": trade_values.get("source"),
+                        "market_data_provider": trade_values.get("market_data_provider"),
+                        "reference_price": trade_values.get("reference_price"),
+                        "reference_price_timestamp": (
+                            trade_values["reference_price_timestamp"].isoformat()
+                            if trade_values.get("reference_price_timestamp")
+                            else None
+                        ),
+                    },
                     db=db,
                 )
             elif action_type == ActionType.CLOSE_TRADE.value:
@@ -350,7 +394,19 @@ def trade_action_handler(data):
                     entity_type=EntityType.TRADE.value,
                     entity_id=str(trade_id_to_close),
                     correlation_id=client_request_id,
-                    payload={"close_price": data.get("close_price"), "realized_pnl": realized_pnl},
+                    payload={
+                        "close_price": data.get("close_price"),
+                        "realized_pnl": realized_pnl,
+                        "source": trade_to_close.source if trade_to_close else None,
+                        "market_data_provider": (
+                            trade_to_close.market_data_provider if trade_to_close else None
+                        ),
+                        "reference_price": (
+                            float(trade_to_close.reference_price)
+                            if trade_to_close and trade_to_close.reference_price is not None
+                            else None
+                        ),
+                    },
                     db=db,
                 )
             db.commit()
