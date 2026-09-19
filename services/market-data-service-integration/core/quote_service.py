@@ -8,6 +8,7 @@ from bottle import response
 
 from core.aggregator import MarketDataAggregator
 from core.fetch_audit import QUOTE_SERVICE, record_error, record_query, record_success
+from core.mock_quote_stream import iter_mock_quote_events
 from core.request_tracker import RequestTracker
 from core.stream_hub import iter_quote_events, parse_symbols
 from providers.quota_providers.alpha_vantage_data_provider import AlphaVantageProvider
@@ -23,6 +24,10 @@ def default_providers() -> dict:
         "alpha_vantage": AlphaVantageProvider(),
         "twelve_data": TwelveDataProvider(),
     }
+
+
+def _env_flag(name: str) -> bool:
+    return (os.getenv(name) or "").strip().lower() in ("1", "true", "yes")
 
 
 class QuoteService:
@@ -132,7 +137,7 @@ class QuoteService:
                 "status": "error",
             })
 
-    def stream_quotes(self, provider_keys: set[str] | None):
+    def stream_quotes(self, provider_keys: set[str] | None, mock: bool = False):
         response.content_type = "text/event-stream"
         response.set_header("Cache-Control", "no-cache")
 
@@ -140,6 +145,25 @@ class QuoteService:
         logging.info("Market data symbols: %s", raw_symbols)
         symbols = parse_symbols(raw_symbols)
         providers = sorted(provider_keys) if provider_keys else list(self.providers.keys())
+
+        use_mock = mock or _env_flag("MARKET_DATA_MOCK_STREAM")
+        if use_mock:
+            logging.info(
+                "Client connected to MOCK market-data stream providers=%s symbols=%s",
+                providers,
+                symbols,
+            )
+
+            def mock_event_generator():
+                try:
+                    yield from iter_mock_quote_events(providers, symbols)
+                except Exception as exc:
+                    logging.error("Error while generating mock market-data stream: %s", exc)
+                finally:
+                    logging.info("Client disconnected from mock market-data stream")
+
+            return mock_event_generator()
+
         logging.info(
             "Client connected to market-data stream providers=%s symbols=%s",
             providers,
