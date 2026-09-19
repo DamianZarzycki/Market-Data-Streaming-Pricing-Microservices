@@ -30,6 +30,22 @@ def generate_once():
     intention = generator.generate_and_send_to_trade_action_service()
     return intention if intention else {"message": "No trade intention generated."}
 
+@app.route('/generate-trade', method=["POST"])
+def generate_trade():
+    # From the request body we need to create the trade and send it to the trade-action-service
+    logging.info("Received request to generate a trade intention with payload")
+    payload = request.json
+    if not payload:
+        response.status = 400
+        return {"message": "Missing payload data"}
+
+    try:
+        intention = generator.generate_and_send_to_trade_action_service(payload)
+    except ValueError as exc:
+        response.status = 400
+        return {"message": str(exc)}
+
+    return intention if intention else {"message": "No trade intention generated."}
 
 @app.route("/generate-batch", method=["GET"])
 def generate_multiple():
