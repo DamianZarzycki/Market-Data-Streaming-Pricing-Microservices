@@ -6,7 +6,7 @@ from decimal import Decimal
 from shared.trading_shared.audit import AuditLogger
 from shared.trading_shared.db import DBSessionManager
 from shared.trading_shared.enums import EntityType, EventType
-from shared.trading_shared.models import MarketDataProviderQuote
+from shared.trading_shared.models import MarketDataProviderQuote, MarketDataSnapshot
 
 db_queue = queue.Queue()
 audit_logger = AuditLogger("market-data-service-integration")
@@ -37,8 +37,19 @@ def db_worker():
                 received_at=_parse_timestamp(quote.get("received_at")) or datetime.now(timezone.utc),
                 raw_payload=quote.get("raw_payload") or {},
             )
+            snapshot = MarketDataSnapshot(
+                snapshot_type="QUOTE",
+                snapshot_time=record.received_at,
+                provider=provider_name,
+                symbol_or_curve_name=symbol,
+                normalized_payload={
+                    key: value for key, value in quote.items() if key != "raw_payload"
+                },
+                payload=quote.get("raw_payload") or {},
+            )
             with DBSessionManager() as db:
                 db.provider_quotes.add(record)
+                db.market_data_snapshots.add(snapshot)
                 db.commit()
             logging.info("Stored %s quote for %s last=%s", provider_name, symbol, quote.get("last"))
             audit_logger.info(

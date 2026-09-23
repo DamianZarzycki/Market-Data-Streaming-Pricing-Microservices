@@ -2,8 +2,14 @@ import logging
 import threading
 import time
 
-from core.curve_service import CurveService
-from core.polling.config import now_utc_iso, read_poll_interval_seconds, read_poll_symbols
+from core.curve_service import CurveService, quote_from_yield_curve
+from core.polling.config import (
+    now_utc_iso,
+    read_curve_poll_interval_seconds,
+    read_poll_interval_seconds,
+    read_poll_symbols,
+    read_symbol_map,
+)
 from core.polling.curve_persistence_worker import CurvePersistenceWorker
 from core.quote_service import QuoteService
 
@@ -14,10 +20,16 @@ class PollWorkers:
         quote_service: QuoteService,
         curve_service: CurveService,
         interval_seconds: float | None = None,
+        curve_interval_seconds: float | None = None,
     ):
         self.quote_service = quote_service
         self.curve_service = curve_service
         self.interval_seconds = interval_seconds or read_poll_interval_seconds()
+        self.curve_interval_seconds = (
+            curve_interval_seconds
+            if curve_interval_seconds is not None
+            else read_curve_poll_interval_seconds()
+        )
         self._stop_event = threading.Event()
         self._quote_cycle_lock = threading.Lock()
         self._curve_cycle_lock = threading.Lock()
@@ -60,6 +72,7 @@ class PollWorkers:
         return {
             "triggered_at": now_utc_iso(),
             "interval_seconds": self.interval_seconds,
+            "curve_interval_seconds": self.curve_interval_seconds,
             "quote_worker": quote_summary,
             "curve_worker": curve_summary,
         }
@@ -118,6 +131,7 @@ class PollWorkers:
             enqueued_count, dropped_count = self._curve_persistence_worker.enqueue_many(
                 successful_curve_payloads
             )
+            self._persist_yield_quotes(successful_curve_payloads)
             persisted_total, persist_errors_total = self._curve_persistence_worker.totals()
             return {
                 "time": now_utc_iso(),
@@ -130,6 +144,16 @@ class PollWorkers:
                 "persist_errors_total": persist_errors_total,
                 "errors": failed_curve_fetches,
             }
+
+    def _persist_yield_quotes(self, curve_payloads: list[dict]) -> None:
+        """Write bond and IRS tenors onto the quote queue so a ticket can book them."""
+        symbol_map = read_symbol_map()
+        for curve_payload in curve_payloads:
+            for asset_class in ("BOND", "IRS"):
+                for symbol in symbol_map.get(asset_class, []):
+                    quote = quote_from_yield_curve(curve_payload, symbol, asset_class)
+                    if quote is not None:
+                        self.quote_service.persist_quote(quote)
 
     def _quote_loop(self) -> None:
         logging.info("Quota poll worker started interval=%ss", self.interval_seconds)
@@ -150,7 +174,7 @@ class PollWorkers:
         logging.info("Quota poll worker stopped")
 
     def _curve_loop(self) -> None:
-        logging.info("Curve poll worker started interval=%ss", self.interval_seconds)
+        logging.info("Curve poll worker started interval=%ss", self.curve_interval_seconds)
         while not self._stop_event.is_set():
             cycle_started_monotonic = time.monotonic()
             try:
@@ -160,7 +184,7 @@ class PollWorkers:
                 logging.exception("Curve poll cycle failed")
             cycle_elapsed_seconds = time.monotonic() - cycle_started_monotonic
             remaining_wait_seconds = max(
-                self.interval_seconds - cycle_elapsed_seconds,
+                self.curve_interval_seconds - cycle_elapsed_seconds,
                 0.0,
             )
             if self._stop_event.wait(remaining_wait_seconds):

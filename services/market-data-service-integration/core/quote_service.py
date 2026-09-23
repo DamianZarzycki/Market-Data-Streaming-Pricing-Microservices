@@ -9,6 +9,7 @@ from bottle import response
 from core.aggregator import MarketDataAggregator
 from core.fetch_audit import QUOTE_SERVICE, record_error, record_query, record_success
 from core.mock_quote_stream import iter_mock_quote_events
+from core.polling.config import futures_quotes_for_equity, read_symbol_map
 from core.request_tracker import RequestTracker
 from core.stream_hub import iter_quote_events, parse_symbols
 from providers.quota_providers.alpha_vantage_data_provider import AlphaVantageProvider
@@ -57,10 +58,26 @@ class QuoteService:
             payload.get("symbol"),
             payload.get("last"),
         )
+        for mirrored in futures_quotes_for_equity(payload):
+            self._queue.put(mirrored)
+            logging.info(
+                "Enqueued %s futures quote for %s last=%s underlying=%s",
+                mirrored.get("provider"),
+                mirrored.get("symbol"),
+                mirrored.get("last"),
+                (mirrored.get("raw_payload") or {}).get("underlying_symbol"),
+            )
 
     def get_quotes(self, symbol: str, asset_class: str):
         with DBSessionManager() as db:
             rows = db.provider_quotes.get_latest_for_symbol(symbol, asset_class)
+            return [serialize(row) for row in rows]
+
+    def get_snapshot(self):
+        """Latest normalized quote per (provider, symbol) across everything on
+        file — backs GET /market-data/snapshot."""
+        with DBSessionManager() as db:
+            rows = db.provider_quotes.get_all_latest()
             return [serialize(row) for row in rows]
 
     def get_quote(self, provider: str, symbol: str) -> dict | None:
@@ -68,7 +85,7 @@ class QuoteService:
             row = db.provider_quotes.get_latest(provider.upper(), symbol)
             return serialize(row)
 
-    def fetch_quote(self, provider: str, symbol: str) -> tuple[str, dict]:
+    def fetch_quote(self, provider: str, symbol: str, persist: bool = True) -> tuple[str, dict]:
         provider_key = provider.strip().lower()
         provider_upper = provider_key.upper()
         symbol = symbol.strip().upper()
@@ -92,6 +109,7 @@ class QuoteService:
                 "provider": provider_upper,
                 "symbol": symbol,
                 "error": reason or "request_denied",
+                "status": "quota_exceeded",
             })
 
         try:
@@ -107,7 +125,8 @@ class QuoteService:
                 })
 
             normalized = engine.normalize_data(raw, symbol)
-            self.persist_quote(normalized, fallback_symbol=symbol)
+            if persist:
+                self.persist_quote(normalized, fallback_symbol=symbol)
             self.tracker.record(provider_key, symbol)
             record_success(QUOTE_SERVICE, normalized)
             return "quote", normalized
@@ -141,9 +160,9 @@ class QuoteService:
         response.content_type = "text/event-stream"
         response.set_header("Cache-Control", "no-cache")
 
-        raw_symbols = os.getenv("MARKET_DATA_SYMBOLS", "")
-        logging.info("Market data symbols: %s", raw_symbols)
-        symbols = parse_symbols(raw_symbols)
+        equity_symbols = read_symbol_map()["EQUITY"]
+        logging.info("Market data equity symbols: %s", equity_symbols)
+        symbols = parse_symbols(",".join(equity_symbols))
         providers = sorted(provider_keys) if provider_keys else list(self.providers.keys())
 
         use_mock = mock or _env_flag("MARKET_DATA_MOCK_STREAM")
@@ -171,7 +190,15 @@ class QuoteService:
         )
 
         def fetch_all(pairs: list[tuple[str, str]]) -> list[tuple[str, dict]]:
-            return asyncio.run(self.aggregator.fetch(pairs))
+            results = asyncio.run(self.aggregator.fetch(pairs))
+            expanded: list[tuple[str, dict]] = []
+            for event, payload in results:
+                expanded.append((event, payload))
+                if event != "quote":
+                    continue
+                for mirrored in futures_quotes_for_equity(payload):
+                    expanded.append(("quote", mirrored))
+            return expanded
 
         def event_generator():
             try:

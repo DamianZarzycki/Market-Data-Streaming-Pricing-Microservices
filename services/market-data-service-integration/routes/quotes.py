@@ -1,10 +1,27 @@
 from bottle import request
 
 from core.helpers import json_error, unknown_provider
+from core.polling.config import read_futures_contracts, read_symbol_map
 from shared.trading_shared.enums import AssetClass
 
 
 def register(app, quote_service):
+    @app.route("/market-data/symbols")
+    def market_data_symbols():
+        symbols = read_symbol_map()
+        contracts = {
+            contract.symbol: {
+                "underlying": contract.underlying,
+                "multiplier": contract.multiplier,
+            }
+            for contract in read_futures_contracts()
+        }
+        return {**symbols, "FUTURES_CONTRACTS": contracts}
+
+    @app.route("/market-data/snapshot")
+    def market_data_snapshot():
+        return {"snapshot": quote_service().get_snapshot()}
+
     @app.route("/market-data/quotes")
     def quotes():
         symbol = (request.query.get("symbol") or "").strip().upper()

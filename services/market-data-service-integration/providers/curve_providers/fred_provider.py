@@ -59,7 +59,7 @@ class FredProvider(CurveProviderBase):
         return None
 
     def normalize_data(self, data, symbol: str | None = None) -> dict:
-        tenors = [tenor for tenor, _ in FRED_SERIES if tenor in data]
+        tenors = [tenor for _, tenor in FRED_SERIES if tenor in data]
         as_of = None
         rates = []
         for tenor in tenors:

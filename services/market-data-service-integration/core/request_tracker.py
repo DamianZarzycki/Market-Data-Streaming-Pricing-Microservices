@@ -54,16 +54,36 @@ class RequestTracker:
     def can_request(self, provider: str) -> tuple[bool, str | None]:
         """Check quota. Returns (allowed, block_reason)."""
         with self._lock:
+            return self._can_request_locked(provider)
+
+    def quota_snapshot(self, provider: str) -> dict | None:
+        """Current used/limit counters plus whether another request is allowed."""
+        with self._lock:
             if provider not in self.limits:
-                return False, "unknown_provider"
-            self._expire_windows(provider)
+                return None
+            allowed, reason = self._can_request_locked(provider)
             caps = self.limits[provider]
             counts = self._counts[provider]
-            for window in ("minute", "hourly", "daily", "monthly"):
-                cap = caps.get(window)
-                if cap is not None and counts[window] >= cap:
-                    return False, f"{window}_limit"
-            return True, None
+            return {
+                "allowed": allowed,
+                "block_reason": reason,
+                "usage": {
+                    window: {"used": counts[window], "limit": caps.get(window)}
+                    for window in ("minute", "hourly", "daily", "monthly")
+                },
+            }
+
+    def _can_request_locked(self, provider: str) -> tuple[bool, str | None]:
+        if provider not in self.limits:
+            return False, "unknown_provider"
+        self._expire_windows(provider)
+        caps = self.limits[provider]
+        counts = self._counts[provider]
+        for window in ("minute", "hourly", "daily", "monthly"):
+            cap = caps.get(window)
+            if cap is not None and counts[window] >= cap:
+                return False, f"{window}_limit"
+        return True, None
 
     def record(self, provider: str, symbol: str | None = None) -> None:
         """Count the request and persist it to DB."""

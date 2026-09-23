@@ -8,7 +8,7 @@ from routes.stream import register as register_stream
 
 def register_routes(app, quote_service, curve_service, snapshot, poll_workers):
     register_health(app, snapshot)
-    register_providers(app, quote_service)
+    register_providers(app, quote_service, curve_service)
     register_quotes(app, quote_service)
     register_stream(app, quote_service)
     register_curves(app, curve_service)

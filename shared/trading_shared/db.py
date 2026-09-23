@@ -6,6 +6,7 @@ from shared.trading_shared.repositories import (
     MarketDataProviderQuoteRepository,
     MarketDataProviderRequestRepository,
     MarketDataRepository,
+    MarketDataSnapshotRepository,
     TradeRepository,
     ValuationRepository,
 )
@@ -37,6 +38,7 @@ class DBSessionManager:
         self.provider_quotes = MarketDataProviderQuoteRepository(self.session)
         self.provider_limits = MarketDataProviderLimitsRepository(self.session)
         self.provider_requests = MarketDataProviderRequestRepository(self.session)
+        self.market_data_snapshots = MarketDataSnapshotRepository(self.session)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):

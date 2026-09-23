@@ -12,7 +12,7 @@ from core.polling.config import (
     read_positive_int_env,
 )
 from shared.trading_shared.db import DBSessionManager
-from shared.trading_shared.models import MarketDataCurve
+from shared.trading_shared.models import MarketDataCurve, MarketDataSnapshot
 
 
 class CurvePersistenceWorker:
@@ -147,9 +147,28 @@ class CurvePersistenceWorker:
         if not curve_records:
             return
 
+        snapshot_records = [
+            MarketDataSnapshot(
+                snapshot_type="CURVE",
+                snapshot_time=curve_record.as_of_time,
+                provider=curve_record.provider,
+                symbol_or_curve_name=curve_record.curve_name,
+                normalized_payload={
+                    "curve_type": curve_record.curve_type,
+                    "currency": curve_record.currency,
+                    "tenors": curve_record.tenors,
+                    "rates": curve_record.rates,
+                },
+                payload=curve_record.raw_payload or {},
+            )
+            for curve_record in curve_records
+        ]
+
         try:
             with DBSessionManager() as db:
                 db.market_data.add_all(curve_records)
+                for snapshot_record in snapshot_records:
+                    db.market_data_snapshots.add(snapshot_record)
                 db.commit()
             with self._metrics_lock:
                 self._persisted_total += len(curve_records)
@@ -177,7 +196,7 @@ class CurvePersistenceWorker:
         ):
             logging.error("Skipping invalid curve payload: %s", curve_payload)
             return None
-        if len(tenors) != len(rates):
+        if len(tenors) == 0 or len(rates) == 0 or len(tenors) != len(rates):
             logging.error(
                 "Skipping invalid curve payload (tenor/rate mismatch): %s",
                 curve_payload,

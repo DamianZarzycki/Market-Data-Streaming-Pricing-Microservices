@@ -25,12 +25,8 @@ BASE_PRICES = {
     "AMZN": 200.10,
     "NVDA": 120.55,
     "SPY": 560.30,
-    "EURUSD": 1.0850,
-    "GBPUSD": 1.2700,
-    "USDJPY": 150.20,
 }
 DEFAULT_BASE_PRICE = 100.0
-FX_SYMBOLS = {"EURUSD", "GBPUSD", "USDJPY"}
 JITTER_PCT = 0.0015  # +/- ~0.15% drift per tick, per (provider, symbol)
 
 
@@ -39,10 +35,6 @@ def mock_interval_seconds() -> float:
         return max(float(os.getenv("MARKET_DATA_MOCK_INTERVAL_SECONDS", "2")), 0.5)
     except ValueError:
         return 2.0
-
-
-def _asset_class_for(symbol: str) -> str:
-    return "FX" if symbol.upper() in FX_SYMBOLS else "EQUITY"
 
 
 def _base_price(symbol: str) -> float:
@@ -76,7 +68,7 @@ def iter_mock_quote_events(providers: list[str], symbols: list[str]):
                 prices[key] = _drift(prices[key])
                 payload = {
                     "provider": provider.upper(),
-                    "asset_class": _asset_class_for(symbol),
+                    "asset_class": "EQUITY",
                     "symbol": symbol,
                     "bid": None,
                     "ask": None,

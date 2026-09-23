@@ -22,6 +22,11 @@ class CurveType(str, Enum):
     FX_FORWARD_CURVE = "FX_FORWARD_CURVE"
     DISCOUNT_CURVE = "DISCOUNT_CURVE"
 
+
+# Written by market-data-service onto simulated yield curves so pricing can
+# prefer a real FRED/ECB row over the generator when both exist.
+SIMULATED_PROVIDER = "SIMULATED"
+
 class SnapshotType(str, Enum):
     FULL = "FULL"
     SPOT = "SPOT"

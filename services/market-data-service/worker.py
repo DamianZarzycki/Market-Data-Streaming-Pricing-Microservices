@@ -17,6 +17,7 @@ from shared.trading_shared.enums import (
     EventType,
     IRSDirection,
     ServiceStatus,
+    SIMULATED_PROVIDER,
     SnapshotType,
 )
 from shared.trading_shared.models import MarketDataCurve, MarketDataSnapshot, MarketDataSpotPrice
@@ -166,6 +167,7 @@ def generate_market_tick():
             "currency": "USD",
             "tenors": ["1M", "3M", "1Y", "5Y"],
             "rates": usd_rates,
+            "provider": SIMULATED_PROVIDER,
             "timestamp": current_tmsp,
         },
         "EUR_YIELD_CURVE": {
@@ -177,6 +179,7 @@ def generate_market_tick():
             "currency": "EUR",
             "tenors": ["1M", "3M", "1Y", "5Y"],
             "rates": eur_rates,
+            "provider": SIMULATED_PROVIDER,
             "timestamp": current_tmsp,
         },
     }
@@ -227,21 +230,26 @@ def publish_tick_to_stream(market_tick_data):
 
 
 def persist_curves(market_tick_data):
-    """Synchronously saves curves before publish — pricing can immediately call get_curve(curve_id)."""
+    """Synchronously saves curves before publish — pricing can immediately call get_curve()."""
+    as_of_time = datetime.now(timezone.utc)
     curve_records = []
     for _, data in market_tick_data.items():
         if "curve_type" not in data:
             continue
+        curve_id_value = data.get("curve_id")
+        if isinstance(curve_id_value, str):
+            curve_id_value = uuid.UUID(curve_id_value)
         curve_records.append(
             MarketDataCurve(
-                curve_id=data.get("curve_id"),
+                curve_id=curve_id_value,
                 event_id=data.get("event_id"),
                 curve_name=data.get("curve_name"),
                 curve_type=data.get("curve_type"),
                 currency=data.get("currency"),
                 tenors=data.get("tenors"),
                 rates=data.get("rates"),
-                event_time=datetime.now(timezone.utc),
+                as_of_time=as_of_time,
+                provider=data.get("provider") or SIMULATED_PROVIDER,
                 raw_payload=data,
             )
         )
@@ -302,6 +310,7 @@ def market_worker():
     while True:
         new_ticks = generate_market_tick()
         update_snapshot(new_ticks)
+        persist_curves(new_ticks)
         publish_tick_to_stream(new_ticks)
         db_queue.put(new_ticks)
         time.sleep(sleep_seconds)

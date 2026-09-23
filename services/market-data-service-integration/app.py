@@ -44,15 +44,21 @@ def poll_workers() -> PollWorkers:
 register_routes(app, quote_service, curve_service, snapshot, poll_workers)
 
 # GET /health
-# GET /providers/<provider>/health
 # GET /providers
+# GET /providers/health
+# GET /providers/<provider>/health
+# GET /market-data/symbols
+# GET /market-data/snapshot
 # GET /market-data/quotes?symbol=AAPL&asset_class=EQUITY
+# GET /market-data/fx-quotes?symbol=EURUSD
+# GET /market-data/curve-quotes?symbol=USD_10Y&asset_class=BOND
 # GET /market-data/quotes/<provider>/<symbol>
 # GET /market-data/stream
 # GET /market-data/stream/<provider>
-# GET /curves
-# GET /curves/<provider>
-# GET /market-data/refresh
+# GET /curves — latest persisted curve per (provider, currency, curve_type)
+# GET /curves/<provider> — latest persisted curve for that provider
+# GET|POST /market-data/refresh
+# GET|POST /curves/refresh — live fetch + persist
 
 if __name__ == "__main__":
     audit_logger.info(
