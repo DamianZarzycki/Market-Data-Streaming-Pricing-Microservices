@@ -5,8 +5,9 @@ A distributed system that simulates real-time market data, generates and books t
 
 ## 2. System Architecture
 The stack is a set of independent microservices:
-* **market-data-service (Port: 8001):** Simulates the market. A background worker emits ticks for EQUITY, BOND, FX, OPTION, IRS, and a synthetic `MARKET_INDEX` benchmark. The live book is an in-memory snapshot (`GET /snapshot` / `GET /stream`).
-* **pricing-service (Port: 8002):** Subscribes to the market stream, marks active trades to market (fair value, PnL), and keeps the latest valuations plus book alpha/beta in memory.
+* **market-data-service (Port: 8001):** Simulates the market. A background worker emits ticks for EQUITY, BOND, FX, OPTION, IRS, and a synthetic `MARKET_INDEX` benchmark. The live book is an in-memory snapshot (`GET /snapshot` / `GET /stream`). Used to price *generated* trades (no `market_data_provider`).
+* **market-data-service-integration (Port: 8005):** The only service that talks to real external providers. Polls Alpha Vantage / Finnhub / Twelve Data (market data) and NBP / ECB / FRED (reference curves) via hand-written HTTP clients, normalizes to one internal quote/curve model, persists to Postgres, and republishes internally over SSE. Backs the trading ticket's provider comparison and the provider-priced valuations. See §12.
+* **pricing-service (Port: 8002):** Subscribes to the market stream, marks active trades to market (fair value, PnL), and keeps the latest valuations plus book alpha/beta in memory. Trades opened against a real provider are marked from *that* provider's quotes only (`provider_pricing_worker`), never mixed with the simulator. IRS is marked from persisted `YIELD_CURVE` rows (`curve_pricing_worker`): FRED/ECB when present, otherwise the simulator curve.
 * **monitoring-service (Port: 8003):** Probes every service `/health` and serves a combined `GET /status` envelope from its health cache.
 * **books-service (Port: 8004):** Book master data (create / update / soft-delete).
 * **blotter-service (Port: 8006):** Trade list API. A worker mirrors pricing SSE into an in-memory valuation cache used by list/detail responses.
@@ -177,3 +178,191 @@ PnL, which can flip sign and make return ratios blow up.
 * Reads the generated scripts from the versions folder and physically executes them in the database. This is the command that actually creates or modifies the tables
 
 docker compose exec postgres psql -U user -d market_data_db
+
+## 12. Real Market Data Integration (HW5)
+
+This section covers the `market-data-service-integration` service (port 8005),
+the trading ticket, and provider-aware pricing. It is the only place the system
+talks to external APIs; all other services consume its unified API/SSE.
+
+### 12.1 Providers and the endpoints we call
+
+Integrations are hand-written HTTP clients (no vendor SDKs). Each provider
+client implements `fetch_data` / `provider_error` / `normalize_data`.
+
+**Group A — market data (used to price trades):**
+* **Alpha Vantage** — `GLOBAL_QUOTE` function; requires `ALPHA_VANTAGE_API_KEY`; free tier is rate-limited (a handful of requests/min). Returns a single last/price point (no live bid/ask).
+* **Finnhub** — `/quote` endpoint; requires `FINNHUB_API_KEY`; returns current/last price fields.
+* **Twelve Data** — `/quote` (or time-series) endpoint; requires `TWELVE_DATA_API_KEY`.
+
+**Group B — official reference data (used for curves):**
+* **NBP** — public FX tables (PLN pairs); no API key.
+* **ECB** — ECB Data Portal FX series (EUR reference rates); no API key.
+* **FRED** — `series/observations` for US Treasury yields / rates; requires `FRED_API_KEY`.
+
+### 12.2 Normalized quote format and bid/ask mapping
+
+All Group A responses are normalized to one internal model:
+
+```
+{ "provider", "asset_class", "symbol", "bid", "ask", "last",
+  "currency", "provider_timestamp", "received_at", "raw_payload" }
+```
+
+**Bid/ask decision:** not every provider returns a two-sided quote. When only a
+last/close price is available, `bid` and `ask` are left `null` and `last`
+carries the price. Pricing then falls back to `last` when the side it needs
+(bid for a long, ask for a short) is missing (see §12.5).
+
+### 12.3 Trading ticket (frontend) and staleness policy
+
+The ticket (Generate trade modal) shows one row per provider — **Alpha Vantage,
+Finnhub, Twelve Data** — for the selected symbol, each tagged:
+* **LIVE** — quote age < 20s.
+* **STALE** — older than that.
+* **MISSING** — no quote on file for that provider/symbol.
+
+**Policy:** a **MISSING** row cannot be selected, so a trade can never be booked
+without a price from the chosen source. A **STALE** row *can* be selected (the
+UI shows a warning) — we allow it deliberately because free-tier providers and
+closed markets routinely make quotes stale, and blocking would make the ticket
+unusable. The trade is still priced against the selected provider.
+
+### 12.4 Trade Action Service (create/close)
+
+`POST /trade-actions` (the ticket target) validates that the chosen provider has
+a **fresh** quote for the symbol before accepting (per-asset-class age windows,
+shared with pricing — see `shared/trading_shared/market_data.py`), then persists
+the trade with `market_data_provider`, `reference_price`,
+`reference_price_timestamp`, and `source` (`TRADING_TICKET` vs `GENERATED`).
+Every create/close writes an AuditLog. On **CLOSE**, the close price is
+re-derived from the trade's own provider (bid for closing a long, ask for a
+short), realized PnL is written to `Valuations`, and the closing valuation is
+pushed to pricing-service so the realized-PnL event reaches the live stream
+(§12.6).
+
+### 12.5 PnL — same source as the trade
+
+Trades opened against a provider are priced **only** from that provider's
+quotes; the simulator path explicitly skips any trade with a
+`market_data_provider`. Marking is side-aware and mirrors the close logic:
+
+```
+long  (BUY):  current_price = bid  (fallback: last)
+short (SELL): current_price = ask  (fallback: last)
+unrealized_pnl = position(current_price) - position(entry_price)
+```
+
+The valuation stream event carries `fair_value`, `current_price`, `entry_price`,
+`unrealized_pnl`, `realized_pnl`, `market_data_provider`, `market_data_timestamp`,
+plus `is_stale` / `market_data_age_seconds` so consumers can show a STALE mark
+instead of trusting an old price as live.
+
+### 12.6 Realized PnL
+
+Closing a position happens in trade-action-service, which computes realized PnL
+and writes the closing `Valuation` row to Postgres. Realized PnL is therefore
+available through the DB-backed APIs (blotter list/detail, `GET /valuations`),
+which is what the UI reads. Note: pricing-service's live `/valuation-stream`
+reflects a closed trade on its next cache reload rather than instantly — an
+accepted trade-off to keep the services decoupled (no cross-service call on
+close).
+
+### 12.7 Market Data Service Integration endpoints (8005)
+
+* **GET /health**, **GET /providers**
+* **GET /providers/health** — one live probe of Finnhub, Alpha Vantage and Twelve Data (connect vs quota exceeded). Counts against quote quotas; does not persist quotes.
+* **GET /providers/<provider>/health** — same probe for one provider (quote or curve).
+* **GET /market-data/snapshot** — latest quote per (provider, symbol) on file.
+* **GET /market-data/quotes?symbol=AAPL&asset_class=EQUITY**
+* **GET /market-data/quotes/<provider>/<symbol>**
+* **GET /market-data/stream**, **GET /market-data/stream/<provider>** (SSE)
+* **GET /curves**, **GET /curves/<provider>** — latest persisted curve(s) from Postgres (no live provider call).
+* **POST /market-data/refresh** — immediate quote fetch (also accepts GET for smoke tests).
+* **POST /curves/refresh** — immediate curve fetch + persist.
+
+### 12.8 API keys / environment
+
+Keys are never hard-coded; set them via `.env` (git-ignored) — see
+`env.example`. The root `.gitignore` ignores `.env` / `.env.*` (keeping
+`env.example`).
+
+```
+ALPHA_VANTAGE_API_KEY=replace_me
+FINNHUB_API_KEY=replace_me
+TWELVE_DATA_API_KEY=replace_me
+FRED_API_KEY=replace_me            # NBP and ECB need no key
+MARKET_DATA_POLL_INTERVAL_SECONDS=30
+CURVE_DATA_REFRESH_INTERVAL_SECONDS=3600
+```
+
+### 12.9 Test commands
+
+```bash
+docker compose up --build
+curl http://localhost:8005/health
+curl http://localhost:8005/providers/health
+curl http://localhost:8005/market-data/snapshot
+curl "http://localhost:8005/market-data/quotes?symbol=AAPL&asset_class=EQUITY"
+curl http://localhost:8005/market-data/quotes/finnhub/AAPL
+curl -X POST http://localhost:8005/market-data/refresh
+curl -X POST http://localhost:8005/curves/refresh
+curl http://localhost:8005/curves
+curl http://localhost:8002/valuations
+```
+
+### 12.10 Known limitations
+
+* **Provider marking** is side-aware (bid for a long, ask for a short, else last).
+  EQUITY, FX and BOND are `price * quantity`. FUTURES multiplies by
+  `contract_multiplier` stored on the trade. OPTION is a European Black-Scholes
+  premium (r = 0) from that spot plus strike, volatility and maturity on the
+  trade. IRS is marked from the yield curve, not from this quote path.
+* **Provider coverage:** equity quotes are live. FX, bonds and IRS use persisted
+  curves. A European option uses the equity spot of its underlying. A futures
+  price is the linked ETF quote (`MARKET_DATA_FUTURES_CONTRACTS`), not an
+  exchange futures chain. The ticket blocks a trade when that quote is missing.
+* **Repricing latency:** `provider_pricing_worker` reprices every 5s from the
+  last persisted quote (DB read, no extra provider calls), so a mark is at most
+  ~5s + the poll interval behind the provider; staleness is surfaced via
+  `is_stale`. `curve_pricing_worker` similarly reprices IRS every 5s from the
+  latest persisted `YIELD_CURVE` per currency (FRED/ECB). Simulator yield
+  curves are used only when no real curve exists for that currency.
+* **Closed-trade cache eviction** (see §8 Known gap) still applies.
+
+### 12.11 Sample ticket values (per asset class)
+
+Book the trade from **Trade Generation → Generate Trade**. The form follows the
+book's `expected_asset_class`. Pick a **LIVE** or **STALE** provider row
+(STALE asks for confirmation; MISSING cannot be booked). Prices in the table
+come from the provider — do not type them except where the table below says so.
+
+Seeded books: `Global Equities`, `FX`, `Fixed Income`, `Interest Rate Swaps`,
+`European Options`, `Index Futures`. Re-run `backend/db/seed_books.sh` if a
+book is missing.
+
+| Class | Book | Symbol | Side / direction | Size | Contract terms | Provider row |
+| --- | --- | --- | --- | --- | --- | --- |
+| EQUITY | Global Equities Book | AAPL | BUY | Qty **100** | — | Finnhub (fallback: Twelve Data / Alpha Vantage). Currency USD from the quote. |
+| FX | FX Book | EURUSD | BUY | Qty **100000** | — | NBP only. Last is the NBP mid cross. Currency USD. ECB/FRED stay MISSING. |
+| BOND | Fixed Income Book | USD_10Y | BUY | Qty **1** | Size is quantity; `last` is the yield, not a dirty price. | FRED. Last ≈ 4.8–5.0% stored as `0.048`–`0.050`. EUR_10Y → ECB. |
+| IRS | Interest Rate Swaps Book | USD_5Y_IRS | Receive fixed (booked as BUY) | Notional **1 000 000 USD** | Fixed rate **4.83%** (UI is percent; payload `0.0483`). Maturity **5**. Payments/year **2**. | FRED last ≈ 4.83%. EUR_10Y_IRS → ECB, notional EUR, maturity **10**, rate ≈ 3.5%. Maturity starts at **0** and must be changed. `trade_price` is always 0. |
+| OPTION | European Options Book | AAPL (underlying) | BUY | Qty **1** | CALL. Strike = selected spot (e.g. **335**). Maturity **1**. Volatility **0.20** (20%). | Same equity providers as AAPL. Maturity and vol start at **0** and must be changed. Premium is Black-Scholes (r = 0) and becomes `trade_price` / `option_price`. |
+| FUTURES | Index Futures Book | ES | BUY | Qty **1** | Multiplier **50**, underlying **SPY** (from `MARKET_DATA_FUTURES_CONTRACTS`). MES = SPY×5, NQ = QQQ×20. | Same providers as the linked ETF. Notional = price × multiplier × qty. NQ needs QQQ on the equity poll list. |
+
+**Worked payloads** (numbers from a typical quote; swap in the row you clicked):
+
+```
+EQUITY   AAPL / BUY / 100 / trade_price = last (e.g. 335.00) / FINNHUB / USD
+FX       EURUSD / BUY / 100000 / trade_price = NBP last (e.g. 1.17) / NBP / USD
+BOND     USD_10Y / BUY / 1 / trade_price = 0.0496 / FRED / USD
+IRS      USD_5Y_IRS / BUY / qty 1 / notional 1000000 / fixed_rate 0.0483
+         / maturity_years 5 / payments_per_year 2 / RECEIVE_FIXED_PAY_FLOAT
+         / trade_price 0 / FRED / USD
+OPTION   AAPL / BUY / 1 / CALL / strike 335 / maturity_years 1 / volatility 0.2
+         / spot = exit price / option_price = computed premium / FINNHUB / USD
+FUTURES  ES / BUY / 1 / contract_multiplier 50 / underlying_symbol SPY
+         / trade_price = SPY last / FINNHUB / USD
+```
+
+Coverage of symbols and endpoints: `services/market-data-service-integration/ASSET_CLASS_COVERAGE.md`.
