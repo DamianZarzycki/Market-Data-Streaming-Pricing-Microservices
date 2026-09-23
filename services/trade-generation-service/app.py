@@ -3,6 +3,7 @@ import logging
 import generator
 import worker
 from bottle import Bottle, request, response
+from generator.http import set_trade_action_provider_mode
 from custom_server import ThreadedServer
 
 from shared.trading_shared.enums import ServiceStatus
@@ -89,15 +90,24 @@ def get_config():
 @app.route("/config", method=["PUT"])
 def put_config():
     payload = request.json
+    previous_provider_mode = generator.get_config().get("use_provider_data")
     try:
         config = generator.update_config(payload)
     except ValueError as exc:
         response.status = 400
         return {"message": str(exc)}
 
+    if isinstance(payload, dict) and "use_provider_data" in payload:
+        try:
+            set_trade_action_provider_mode(config["use_provider_data"])
+        except ValueError as exc:
+            generator.update_config({"use_provider_data": previous_provider_mode})
+            response.status = 502
+            return {"message": str(exc)}
+
     return {
         "message": "Config updated successfully.",
-        "config": config,
+        "config": generator.get_config(),
     }
 
 

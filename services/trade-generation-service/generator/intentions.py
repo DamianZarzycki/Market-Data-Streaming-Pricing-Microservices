@@ -4,15 +4,18 @@ import random
 import uuid
 
 from shared.trading_shared.db import DBSessionManager
-from shared.trading_shared.enums import ActionType, AssetClass, TradeSide, TradeStatus
+from shared.trading_shared.enums import ActionType, AssetClass, TradeSide, TradeSource, TradeStatus
 
 from .config import generator_config
 from .http import (
     _BOOKS_URL,
     _HTTP_POOL,
+    _INTEGRATION_SNAPSHOT_URL,
+    _INTEGRATION_SYMBOLS_URL,
     _SNAPSHOT_URL,
     _SYMBOLS_URL,
     fetch_json_once,
+    forward_supplied_trade_action,
     send_to_trade_action_service,
 )
 from .lifecycle import generator_state
@@ -50,7 +53,17 @@ def generate_and_send_to_trade_action_service_batch(count=None):
     return None
 
 
-def generate_and_send_to_trade_action_service():
+def generate_and_send_to_trade_action_service(payload=None):
+    if payload is not None:
+        if not isinstance(payload, dict) or not payload:
+            raise ValueError("Payload must be a JSON object")
+        result = forward_supplied_trade_action(payload)
+        generator_state["total_generated"] += 1
+        logging.info(
+            f"[Trade Generation] Forwarded supplied intention {generator_state['total_generated']}."
+        )
+        return result if result is not None else payload
+
     intention = generate_random_intention()
 
     if intention:
@@ -130,7 +143,14 @@ def generate_random_intention(open_context=_NO_SHARED_CONTEXT):
         logging.info(f"Generated action: {action} == {ActionType.CLOSE_TRADE.value}")
 
         if action == ActionType.CLOSE_TRADE.value:
-            close_payload = _close_intention_from_db()
+            # Provider mode only unwinds trades the ticket opened. Simulator
+            # mode still picks any active trade.
+            close_source = (
+                TradeSource.TRADING_TICKET.value
+                if generator_config.get("use_provider_data")
+                else None
+            )
+            close_payload = _close_intention_from_db(close_source)
             if close_payload is not None:
                 return close_payload
             logging.info(
@@ -160,12 +180,12 @@ def _open_intention(open_context):
 # jak constrainy moze wplynac na transakcje DB -> duze tabele i sprawdzanie id w trakcie insertow
 # profiling
 
-def _close_intention_from_db():
+def _close_intention_from_db(source=None):
     """Read active trades in a short session, then return. No HTTP in here (TX-2)."""
     with DBSessionManager() as db:
-        logging.info("Checking for active trades to close...")
+        logging.info("Checking for active trades to close (source=%s)...", source or "any")
         active_trades = db.trades.get_trades(
-            None, status=TradeStatus.ACTIVE.value, symbol=None
+            None, status=TradeStatus.ACTIVE.value, symbol=None, source=source
         )
         if not active_trades:
             return None
@@ -191,12 +211,19 @@ def _close_intention_from_db():
 
 def _fetch_open_market_context():
     """Fetch books, symbols, and snapshot in parallel. Returns a tuple or None."""
+    use_provider = bool(generator_config.get("use_provider_data"))
+    symbols_url = _INTEGRATION_SYMBOLS_URL if use_provider else _SYMBOLS_URL
+    snapshot_url = _INTEGRATION_SNAPSHOT_URL if use_provider else _SNAPSHOT_URL
+    source_name = (
+        "market-data-service-integration" if use_provider else "market-data-service"
+    )
     logging.info(
-        "ASKING BOOKS-SERVICE for available books and market-data-service for symbols..."
+        "ASKING BOOKS-SERVICE for available books and %s for symbols...",
+        source_name,
     )
     books_future = _HTTP_POOL.submit(fetch_json_once, _BOOKS_URL)
-    symbols_future = _HTTP_POOL.submit(fetch_json_once, _SYMBOLS_URL)
-    snapshot_future = _HTTP_POOL.submit(fetch_json_once, _SNAPSHOT_URL)
+    symbols_future = _HTTP_POOL.submit(fetch_json_once, symbols_url)
+    snapshot_future = _HTTP_POOL.submit(fetch_json_once, snapshot_url)
     try:
         books_response = books_future.result()
         symbols_response = symbols_future.result()
@@ -207,10 +234,14 @@ def _fetch_open_market_context():
 
     books_data = books_response.get("books", []) if books_response else []
     symbols_data = symbols_response if symbols_response else {}
+    if use_provider:
+        snapshot = snapshot.get("snapshot") if isinstance(snapshot, dict) else []
+        if not isinstance(snapshot, list):
+            snapshot = []
     logging.info(
         f"Fetched {len(books_data)} books and {len(symbols_data)} asset classes."
     )
-    return books_data, symbols_data, snapshot
+    return books_data, symbols_data, snapshot, use_provider
 
 
 def _open_intention_from_http():
@@ -220,7 +251,129 @@ def _open_intention_from_http():
     return _open_intention_from_context(*context)
 
 
-def _open_intention_from_context(books_data, symbols_data, snapshot):
+def _quote_price(quote):
+    """Last traded price, or bid/ask when the provider did not send last."""
+    last = quote.get("last")
+    if last is not None:
+        return float(last)
+    bid = quote.get("bid")
+    ask = quote.get("ask")
+    if bid is not None and ask is not None:
+        return (float(bid) + float(ask)) / 2.0
+    if bid is not None:
+        return float(bid)
+    if ask is not None:
+        return float(ask)
+    return None
+
+
+def _reference_timestamp(quote):
+    raw = quote.get("provider_timestamp") or quote.get("received_at")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    text = raw.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    else:
+        parsed = parsed.astimezone(datetime.timezone.utc)
+    return parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _open_from_provider_quote(book, book_asset_class, lookup_class, symbols_data, quotes):
+    """OPEN priced off a persisted integration quote.
+
+    OPTION and IRS quotes do not carry strike, volatility, or swap terms, so
+    those books are skipped the same way a missing simulator tick is.
+    """
+    if lookup_class in (AssetClass.OPTION.value, AssetClass.IRS.value):
+        logging.error(
+            "Operation aborted: provider mode has no contract params for %s.",
+            lookup_class,
+        )
+        return None
+
+    available_symbols = symbols_data.get(lookup_class, [])
+    if not available_symbols and lookup_class != book_asset_class:
+        available_symbols = symbols_data.get(book_asset_class, [])
+    if not available_symbols:
+        logging.error(
+            f"Operation aborted: Market Data has no symbols for asset class {book_asset_class}."
+        )
+        return None
+
+    symbol_set = {str(symbol).upper() for symbol in available_symbols}
+    matching = [
+        quote
+        for quote in quotes
+        if isinstance(quote, dict)
+        and str(quote.get("asset_class") or "").upper() == lookup_class
+        and str(quote.get("symbol") or "").upper() in symbol_set
+    ]
+    if not matching:
+        logging.error(
+            "Operation aborted: no provider quote for asset class %s.",
+            lookup_class,
+        )
+        return None
+
+    quote = random.choice(matching)
+    price = _quote_price(quote)
+    timestamp = _reference_timestamp(quote)
+    provider = quote.get("provider")
+    if price is None or price <= 0 or not timestamp or not provider:
+        logging.error(
+            "Operation aborted: provider quote for %s is missing price, provider, or timestamp.",
+            quote.get("symbol"),
+        )
+        return None
+
+    side = random.choice([TradeSide.BUY.value, TradeSide.SELL.value])
+    payload = {
+        "action_type": ActionType.OPEN_TRADE.value,
+        "client_request_id": generate_request_id(),
+        "book_id": book.get("book_id"),
+        "asset_class": book_asset_class,
+        "symbol": quote.get("symbol"),
+        "side": side,
+        "quantity": random.randint(
+            generator_config["qty_min"],
+            generator_config["qty_max"],
+        ),
+        "trade_price": round(price, 4),
+        "currency": quote.get("currency") or "USD",
+        "market_data_provider": provider,
+        "reference_price": round(price, 6),
+        "reference_price_timestamp": timestamp,
+        "source": "GENERATED",
+    }
+    if lookup_class == AssetClass.FUTURES.value:
+        raw = quote.get("raw_payload") if isinstance(quote.get("raw_payload"), dict) else {}
+        multiplier = raw.get("contract_multiplier")
+        try:
+            multiplier = float(multiplier)
+        except (TypeError, ValueError):
+            multiplier = None
+        if multiplier is None or multiplier <= 0:
+            logging.error(
+                "Operation aborted: futures quote %s has no contract_multiplier.",
+                quote.get("symbol"),
+            )
+            return None
+        payload["contract_multiplier"] = multiplier
+        if raw.get("underlying_symbol"):
+            payload["underlying_symbol"] = raw.get("underlying_symbol")
+
+    logging.info(f"Success! Generated JSON for opening: {payload}")
+    return payload
+
+
+def _open_intention_from_context(books_data, symbols_data, snapshot, use_provider=False):
     if not books_data:
         logging.error(
             "Operation aborted: API returned 0 books. Ensure books are created!"
@@ -242,6 +395,15 @@ def _open_intention_from_context(books_data, symbols_data, snapshot):
     lookup_class = _ASSET_CLASS_ALIASES.get(
         book_asset_class, book_asset_class
     )
+    if use_provider:
+        return _open_from_provider_quote(
+            book,
+            book_asset_class,
+            lookup_class,
+            symbols_data,
+            snapshot if isinstance(snapshot, list) else [],
+        )
+
     available_symbols = symbols_data.get(lookup_class, [])
     if not available_symbols and lookup_class != book_asset_class:
         available_symbols = symbols_data.get(book_asset_class, [])

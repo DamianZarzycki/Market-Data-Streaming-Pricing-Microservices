@@ -11,6 +11,7 @@ from shared.trading_shared.enums import (
     AssetClass,
     EntityType,
     EventType,
+    OptionRightType,
     TradeSide,
     TradeSource,
 )
@@ -28,6 +29,29 @@ def _normalize_trade_source(source_value):
     if normalized in (TradeSource.TRADING_TICKET.value, TradeSource.GENERATED.value):
         return normalized
     return TradeSource.GENERATED.value
+
+
+def _as_float(value):
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _reject_open_trade(db, metrics_note, action_type, client_request_id, symbol, enqueued_at):
+    logging.error(
+        f"OPEN_TRADE rejected: {metrics_note} for client_request_id {client_request_id}"
+    )
+    db.commit()
+    metrics.record_error(
+        action_type,
+        client_request_id,
+        symbol,
+        metrics_note,
+        enqueued_at,
+    )
 
 
 def _parse_reference_timestamp(value):
@@ -118,19 +142,48 @@ def trade_action_handler(data):
                     logging.info(f"OPTION: {data}.")
 
                     option_right_type = data.get("option_right_type")
-                    option_type = data.get("option_type")
-                    option_details = {
+                    option_type = data.get("option_type") or "EUROPEAN"
+                    strike = _as_float(data.get("strike"))
+                    volatility = _as_float(data.get("volatility"))
+                    maturity_years = _as_float(data.get("maturity_years"))
+                    option_price = _as_float(data.get("option_price"))
+                    missing_option = []
+                    if strike is None or strike <= 0:
+                        missing_option.append("strike")
+                    if volatility is None or volatility <= 0:
+                        missing_option.append("volatility")
+                    if maturity_years is None or maturity_years <= 0:
+                        missing_option.append("maturity_years")
+                    if option_price is None or option_price < 0:
+                        missing_option.append("option_price")
+                    if option_right_type not in (
+                        OptionRightType.CALL.value,
+                        OptionRightType.PUT.value,
+                    ):
+                        missing_option.append("option_right_type")
+                    if option_type != "EUROPEAN":
+                        missing_option.append("option_type")
+                    if missing_option:
+                        _reject_open_trade(
+                            db,
+                            f"missing OPTION params {missing_option}",
+                            action_type,
+                            client_request_id,
+                            symbol,
+                            enqueued_at,
+                        )
+                        return
+
+                    metadata_payload = {
                         "spot": data.get("spot"),
-                        "strike": data.get("strike"),
-                        "volatility": data.get("volatility"),
-                        "maturity_years": data.get("maturity_years"),
+                        "strike": strike,
+                        "volatility": volatility,
+                        "maturity_years": maturity_years,
                         "option_right_type": option_right_type,
                         "option_type": option_type,
-                        "option_price": data.get("option_price"),
+                        "option_price": option_price,
                     }
-
-                    metadata_payload = option_details
-                    trade_price = data.get("option_price")
+                    trade_price = option_price
                     process_note = "option opened"
                 elif asset_class == AssetClass.IRS.value:
                     logging.info(f"IRS: {data}.")
@@ -171,6 +224,27 @@ def trade_action_handler(data):
                     if trade_price is None:
                         trade_price = 0
                     process_note = "IRS metadata"
+                elif asset_class == AssetClass.FUTURES.value:
+                    logging.info(f"FUTURES: {data}.")
+                    multiplier = _as_float(data.get("contract_multiplier"))
+                    trade_price = _as_float(data.get("trade_price"))
+                    if multiplier is None or multiplier <= 0 or trade_price is None:
+                        _reject_open_trade(
+                            db,
+                            "missing FUTURES params contract_multiplier/trade_price",
+                            action_type,
+                            client_request_id,
+                            symbol,
+                            enqueued_at,
+                        )
+                        return
+                    metadata_payload = {
+                        "contract_multiplier": multiplier,
+                        "underlying_symbol": data.get("underlying_symbol"),
+                    }
+                    if instrument.asset_class == AssetClass.FUTURES.value:
+                        instrument.multiplier = multiplier
+                    process_note = "futures metadata"
                 else:
                     trade_price = data.get("trade_price")
                     process_note = "trade created"
@@ -307,8 +381,91 @@ def trade_action_handler(data):
                     return
 
                 symbol = trade_to_close.symbol or symbol
+
+                # A trade opened against a specific provider must close at
+                # THAT provider's current price, not whatever the caller
+                # supplies — otherwise realized PnL could be priced off a
+                # different source than the position was opened with.
+                close_price = None
+                close_price_error = None
+                market_data_timestamp = None
+                is_long = (
+                    trade_to_close.side == TradeSide.BUY.value
+                    or trade_to_close.side == "BUY"
+                )
+
+                if trade_to_close.market_data_provider:
+                    latest_quote = db.provider_quotes.get_latest(
+                        trade_to_close.market_data_provider, trade_to_close.symbol
+                    )
+                    if latest_quote is None:
+                        close_price_error = (
+                            f"no current quote from {trade_to_close.market_data_provider} "
+                            f"for {trade_to_close.symbol} to price the close"
+                        )
+                    else:
+                        # Closing a long SELLS into the bid; closing a short
+                        # BUYS BACK at the ask — using the midpoint instead
+                        # would give away the spread. Only fall back to the
+                        # last traded price if the book side we need isn't
+                        # quoted (e.g. free-tier providers with bid=ask=None).
+                        if is_long:
+                            quote_price = (
+                                latest_quote.bid
+                                if latest_quote.bid is not None
+                                else latest_quote.last
+                            )
+                        else:
+                            quote_price = (
+                                latest_quote.ask
+                                if latest_quote.ask is not None
+                                else latest_quote.last
+                            )
+                        if quote_price is None:
+                            close_price_error = (
+                                f"quote from {trade_to_close.market_data_provider} for "
+                                f"{trade_to_close.symbol} has neither the needed side "
+                                f"nor a last price"
+                            )
+                        else:
+                            close_price = float(quote_price)
+                            market_data_timestamp = (
+                                latest_quote.provider_timestamp or latest_quote.received_at
+                            )
+                else:
+                    raw_close_price = data.get("close_price")
+                    try:
+                        parsed_close_price = float(raw_close_price)
+                    except (TypeError, ValueError):
+                        parsed_close_price = None
+                    if parsed_close_price is None or parsed_close_price <= 0:
+                        close_price_error = f"Invalid close_price: {raw_close_price!r}"
+                    else:
+                        close_price = parsed_close_price
+
+                if close_price_error:
+                    logging.error(f"CLOSE_TRADE failed: {close_price_error}")
+                    db.rollback()
+                    audit_logger.warning(
+                        EventType.DB_REJECT,
+                        f"CLOSE_TRADE rejected: {close_price_error}",
+                        entity_type=EntityType.TRADE.value,
+                        entity_id=str(trade_id_to_close),
+                        correlation_id=client_request_id,
+                        db=db,
+                    )
+                    db.commit()
+                    metrics.record_error(
+                        action_type,
+                        client_request_id,
+                        symbol,
+                        close_price_error,
+                        enqueued_at,
+                    )
+                    return
+
                 trade_to_close.status = "CLOSED"
-                trade_to_close.close_price = data.get("close_price")
+                trade_to_close.close_price = close_price
                 trade_to_close.close_reason = data.get("close_reason")
                 trade_to_close.closed_at = datetime.now(timezone.utc)
                 if client_request_id:
@@ -316,11 +473,10 @@ def trade_action_handler(data):
                     close_metadata["close_client_request_id"] = client_request_id
                     trade_to_close.metadata_payload = close_metadata
 
-                close_price = float(data.get("close_price"))
                 trade_price = float(trade_to_close.trade_price)
                 quantity = float(trade_to_close.quantity)
 
-                if trade_to_close.side == TradeSide.BUY.value or trade_to_close.side == "BUY":
+                if is_long:
                     realized_pnl = round((close_price - trade_price) * quantity, 4) or None
                 else:
                     realized_pnl = round((trade_price - close_price) * quantity, 4) or None
@@ -337,6 +493,8 @@ def trade_action_handler(data):
                     realized_pnl=realized_pnl,
                     total_pnl=realized_pnl,
                     currency=trade_to_close.trade_currency,
+                    market_data_provider=trade_to_close.market_data_provider,
+                    market_data_timestamp=market_data_timestamp,
                     market_data_reference=f"CLOSE:{trade_to_close.symbol}@{datetime.now(timezone.utc).isoformat()}",
                     valuation_payload={
                         "close_price": close_price,

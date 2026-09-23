@@ -22,6 +22,22 @@ def status():
     return trade_action_service.get_status()
 
 
+@app.route("/provider-mode", method=["PUT"])
+def put_provider_mode():
+    payload = request.json
+    if not isinstance(payload, dict) or "use_provider_data" not in payload:
+        response.status = 400
+        return {"error": "use_provider_data is required"}
+
+    enabled = payload.get("use_provider_data")
+    if not isinstance(enabled, bool):
+        response.status = 400
+        return {"error": "use_provider_data must be a boolean"}
+
+    trade_action_service.set_use_provider_data(enabled)
+    return {"use_provider_data": trade_action_service.use_provider_data()}
+
+
 @app.route("/trade-actions", method=["POST"])
 def trade_actions():
     logging.info("New /trade-actions request received")

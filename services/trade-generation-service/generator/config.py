@@ -10,6 +10,7 @@ _DEFAULT_CONFIG = {
     "qty_max": 1000,
     "price_min": 50.0,
     "price_max": 150.0,
+    "use_provider_data": False,
 }
 
 CONFIG_KEYS = frozenset(_DEFAULT_CONFIG.keys())
@@ -23,6 +24,7 @@ _ENV_BY_KEY = {
     "qty_max": "TRADE_GENERATION_QTY_MAX",
     "price_min": "TRADE_GENERATION_PRICE_MIN",
     "price_max": "TRADE_GENERATION_PRICE_MAX",
+    "use_provider_data": "USE_PROVIDER_DATA",
 }
 
 
@@ -41,6 +43,18 @@ def _as_int(value, field):
         return int(value)
     except (TypeError, ValueError):
         raise ValueError(f"{field} must be an integer")
+
+
+def _as_bool(value, field):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("1", "true", "yes", "on"):
+            return True
+        if normalized in ("0", "false", "no", "off", ""):
+            return False
+    raise ValueError(f"{field} must be a boolean")
 
 
 def _as_float(value, field):
@@ -119,6 +133,14 @@ def _patch_qty_range(config, payload):
         raise ValueError("qty_min must be <= qty_max")
 
 
+def _patch_use_provider_data(config, payload):
+    if "use_provider_data" not in payload:
+        return
+    config["use_provider_data"] = _as_bool(
+        payload["use_provider_data"], "use_provider_data"
+    )
+
+
 def _patch_price_range(config, payload):
     if "price_min" in payload:
         config["price_min"] = _as_float(payload["price_min"], "price_min")
@@ -141,6 +163,7 @@ def _apply_config_patch(base, payload):
     _patch_open_close_weights(next_config, payload)
     _patch_qty_range(next_config, payload)
     _patch_price_range(next_config, payload)
+    _patch_use_provider_data(next_config, payload)
     return next_config
 
 
