@@ -8,7 +8,7 @@ import cache_service
 import calculation_service
 import valuation_service
 from shared.trading_shared.audit import AuditLogger
-from shared.trading_shared.enums import ConnectionStatus, EventType
+from shared.trading_shared.enums import AssetClass, ConnectionStatus, EventType
 from shared.trading_shared.db import DBSessionManager
 
 stats_lock = threading.Lock()
@@ -122,6 +122,75 @@ def metrics_worker():
 def cache_refresh_worker():
     while True:
         cache_service.reload_active_trades_cache()
+        time.sleep(5)
+
+
+MARKET_DATA_INTEGRATION_URL = "http://market-data-service-integration:8005"
+
+
+def _fetch_provider_quote(provider, symbol):
+    # /market-data/quotes/<provider>/<symbol> validates <provider> against
+    # lowercase provider keys ("finnhub"), while trade.market_data_provider
+    # is stored uppercase ("FINNHUB") — lowercase it for the URL only; the
+    # route's own DB lookup uppercases again internally.
+    url = f"{MARKET_DATA_INTEGRATION_URL}/market-data/quotes/{provider.lower()}/{symbol}"
+    try:
+        with request.urlopen(url, timeout=5) as response:
+            return json.loads(response.read().decode())
+    except Exception as e:
+        logging.warning(f"Failed to fetch quote for {provider}/{symbol}: {e}")
+        return None
+
+
+def provider_pricing_worker():
+    """Reprice active trades opened against a real provider.
+
+    IRS is left to curve_pricing_worker. OPTION is marked with Black-Scholes
+    using this quote as spot. FUTURES uses the quote times contract_multiplier.
+    Everything else is side-aware bid/ask/last times quantity.
+    """
+    while True:
+        try:
+            with cache_service.cache_lock:
+                provider_trades = [
+                    t
+                    for t in cache_service.active_trades_cache.values()
+                    if t.market_data_provider and t.asset_class != AssetClass.IRS.value
+                ]
+
+            pairs = {(t.market_data_provider, t.symbol) for t in provider_trades}
+            quotes_by_pair = {}
+            for provider, symbol in pairs:
+                quote = _fetch_provider_quote(provider, symbol)
+                if quote is not None and not quote.get("error"):
+                    quotes_by_pair[(provider, symbol)] = quote
+
+            for trade in provider_trades:
+                quote = quotes_by_pair.get((trade.market_data_provider, trade.symbol))
+                if quote is None:
+                    continue
+                try:
+                    calculation_service.price_trade_from_provider_quote(trade, quote)
+                except Exception as e:
+                    logging.error(f"Error pricing provider trade {trade.trade_id}: {e}")
+        except Exception as e:
+            logging.error(f"Error in provider_pricing_worker: {e}")
+        time.sleep(5)
+
+
+def curve_pricing_worker():
+    """Reprice IRS from persisted FRED/ECB yield curves.
+
+    Reads MarketDataCurve (latest YIELD_CURVE per currency, excluding the
+    simulator). Does not call /curves on the integration service — that GET
+    is a DB snapshot, and live fetches stay on POST /curves/refresh and the
+    curve poll worker.
+    """
+    while True:
+        try:
+            calculation_service.reprice_irs_from_persisted_curves()
+        except Exception as e:
+            logging.error(f"Error in curve_pricing_worker: {e}")
         time.sleep(5)
 
 

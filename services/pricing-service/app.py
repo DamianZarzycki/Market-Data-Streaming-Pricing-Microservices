@@ -139,16 +139,38 @@ if __name__ == "__main__":
     cache_thread.daemon = True
     cache_thread.start()
 
-    cache_thread = threading.Thread(target=worker.valuation_worker)
-    cache_thread.daemon = True
-    cache_thread.start()
-
     audit_logger.info(
         EventType.WORKER_STARTED,
         "Valuation thread started",
         entity_type="Service",
         correlation_id=None,
     )
+
+    valuation_thread = threading.Thread(target=worker.valuation_worker)
+    valuation_thread.daemon = True
+    valuation_thread.start()
+
+    audit_logger.info(
+        EventType.WORKER_STARTED,
+        "Provider pricing thread started",
+        entity_type="Service",
+        correlation_id=None,
+    )
+
+    provider_pricing_thread = threading.Thread(target=worker.provider_pricing_worker)
+    provider_pricing_thread.daemon = True
+    provider_pricing_thread.start()
+
+    audit_logger.info(
+        EventType.WORKER_STARTED,
+        "Curve pricing thread started",
+        entity_type="Service",
+        correlation_id=None,
+    )
+
+    curve_pricing_thread = threading.Thread(target=worker.curve_pricing_worker)
+    curve_pricing_thread.daemon = True
+    curve_pricing_thread.start()
 
     try:
         app.run(host="0.0.0.0", port=8002, server=ThreadedServer)
@@ -174,6 +196,18 @@ if __name__ == "__main__":
         audit_logger.info(
             EventType.WORKER_STOPPED,
             "Valuation thread stopped",
+            entity_type="Service",
+            correlation_id=None,
+        )
+        audit_logger.info(
+            EventType.WORKER_STOPPED,
+            "Provider pricing thread stopped",
+            entity_type="Service",
+            correlation_id=None,
+        )
+        audit_logger.info(
+            EventType.WORKER_STOPPED,
+            "Curve pricing thread stopped",
             entity_type="Service",
             correlation_id=None,
         )
