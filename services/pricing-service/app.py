@@ -10,7 +10,7 @@ from shared.trading_shared.enums import EventType
 from shared.trading_shared.logging_config import configure_logging
 import worker
 import calculation_service
-import books.book_metrics_service
+from books import book_metrics_service
 
 configure_logging("pricing-service")
 app = Bottle()
@@ -82,7 +82,12 @@ def valuation_stream():
             with calculation_service.pricing_lock:
                 snapshot = list(calculation_service.valuations_store.values())
             for valuation_data in snapshot:
-                yield f"event: valuation_update\ndata: {json.dumps(valuation_data)}\n\n"
+                try:
+                    payload = json.dumps(valuation_data)
+                except Exception as e:
+                    logging.error(f"Error serializing valuation snapshot for SSE: {e}")
+                    continue
+                yield f"event: valuation_update\ndata: {payload}\n\n"
 
             while True:
                 valuation_data = client_queue.get()

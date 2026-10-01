@@ -73,7 +73,10 @@ def pricing_worker():
             for tick in read_events(stream_response):
                 logging.info(f"Read tick: {tick}")
                 update_market_state(tick)
-                calculation_service.recalculate_valuations(tick)
+                try:
+                    calculation_service.recalculate_valuations(tick)
+                except Exception as e:
+                    logging.error(f"Error recalculating valuations: {e}")
 
         except Exception as e:
             with stats_lock:

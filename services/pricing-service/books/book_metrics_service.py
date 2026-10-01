@@ -21,7 +21,6 @@ import os
 import threading
 from collections import defaultdict, deque
 from datetime import datetime, timezone
-from typing import Any
 
 # Rolling window length (number of aligned observations). Configurable so the
 # assignment's "e.g. last 100 observations" can be tuned without a code change.
@@ -151,7 +150,7 @@ def update_book_metrics(book_id, book_value, benchmark_return):
     if len(book_pairs) < MIN_OBSERVATIONS:
         return
 
-    metrics = compute_metrics(book_id, list[Any](book_pairs))
+    metrics = compute_metrics(book_id, list(book_pairs))
     metrics_store[book_id] = metrics
     logging.info(
         f"Book {book_id} metrics updated: alpha={metrics['alpha']}, "

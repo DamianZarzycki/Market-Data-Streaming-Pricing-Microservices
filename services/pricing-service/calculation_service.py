@@ -2,6 +2,8 @@ import logging
 import queue
 import threading
 from datetime import datetime, timezone
+from decimal import Decimal
+from uuid import UUID
 
 from instruments_pricing.irs_pricing_service import price_irs
 from instruments_pricing.option_pricing_service import (
@@ -174,7 +176,27 @@ def _price_trade(tick, trade, asset_type):
     store_and_publish(trade, valuation_data)
 
 
+def _json_safe(value):
+    """Copy a valuation payload into types json.dumps and JSONB accept.
+
+    Curve rows carry as_of_time as a datetime. Leaving it in the payload
+    makes /valuation-stream and the valuations insert return 500.
+    """
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
 def store_and_publish(trade, valuation_data):
+    valuation_data = _json_safe(valuation_data)
     trade_id = valuation_data["trade_id"]
     trade_valuation_queue.put(valuation_data)
 
@@ -404,7 +426,11 @@ def _curve_payload_from_row(curve_row):
         "provider": curve_row.provider,
         "curve_name": curve_row.curve_name,
         "curve_type": curve_row.curve_type,
-        "as_of_time": curve_row.as_of_time,
+        "as_of_time": (
+            curve_row.as_of_time.isoformat()
+            if isinstance(curve_row.as_of_time, datetime)
+            else curve_row.as_of_time
+        ),
     }
 
 
@@ -481,7 +507,7 @@ def reprice_irs_from_persisted_curves():
 
 def recalculate_valuations(tick):
     """Route an incoming market tick: curve ticks reprice IRS, spot ticks reprice by symbol."""
-    import book_metrics_service
+    from books import book_metrics_service
     import cache_service
 
     if tick.get("curve_id"):
