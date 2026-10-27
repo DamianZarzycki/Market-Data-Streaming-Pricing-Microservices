@@ -24,6 +24,9 @@ _COLLIDING = (
     "custom_server",
     "market_data_simulator",
     "instruments_pricing",
+    "models",
+    "state",
+    "routes",
 )
 
 
