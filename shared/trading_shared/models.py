@@ -77,6 +77,10 @@ class Trade(Base):
         DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
     )
 
+    __table_args__ = (
+        Index("ix_trades_book_id_status", "book_id", "status"),
+    )
+
 
 class Valuation(Base):
     __tablename__ = "valuations"
@@ -210,3 +214,7 @@ class AuditLog(Base):
     message: Mapped[str] = mapped_column(Text, nullable=False)
     payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+    __table_args__ = (
+        Index("ix_audit_logs_created_at", "created_at"),
+    )
