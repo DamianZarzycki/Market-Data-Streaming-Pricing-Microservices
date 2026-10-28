@@ -15,7 +15,14 @@ from sqlalchemy.orm import sessionmaker
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-engine = create_engine(DATABASE_URL)
+# pool_pre_ping discards a connection Postgres has already closed. pool_recycle
+# replaces a connection before a server-side idle timeout does. Pool size stays
+# at the SQLAlchemy default: eight services already sit near max_connections.
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    pool_recycle=1800,
+)
 
 SessionLocal = sessionmaker(
     # more control over changes that are pending to be written to the database, allowing for better transaction management and error handling.
