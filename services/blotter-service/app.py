@@ -1,94 +1,61 @@
-# GET /health
-# GET /books/summary
-# GET /trades
-# GET /trades/<trade_id>
-# GET /trades/<trade_id>/valuations
-
-
+import asyncio
 import logging
 import threading
-from bottle import Bottle, request, response
+from contextlib import asynccontextmanager
+
+import uvicorn
+from fastapi import FastAPI
+
 from shared.trading_shared.audit import AuditLogger
 from shared.trading_shared.enums import EventType
 from shared.trading_shared.logging_config import configure_logging
-import trades_service
-from custom_server import ThreadedServer
+
 import worker
+from api.errors import install_error_handlers
+from routes import register_routes
 
 configure_logging("blotter-service")
 
-app = Bottle()
+_JOIN_TIMEOUT_SECONDS = 5
 
 
-@app.route("/health")
-def health():
-    logging.info("Health check requested.")
-    return trades_service.get_health()
-
-
-@app.route("/books/summary")
-def book_summary():
-    try:
-        return trades_service.fetch_book_summary()
-    except Exception as e:
-        logging.error(f"Failed to fetch book summary: {e}")
-        response.status = 500
-        return {"error": "Failed to fetch book summary"}
-
-
-@app.route("/trades")
-def trades():
-    filters = {
-        "book_id": request.query.get("book_id"),
-        "asset_class": request.query.get("asset_class"),
-        "status": request.query.get("status"),
-        "symbol": request.query.get("symbol"),
-        "first_only": request.query.get("first_only", False),
-        "page": request.query.get("page"),
-        "limit": request.query.get("limit"),
-    }
-    return {"trades": trades_service.fetch_trades(filters=filters)}
-
-
-@app.route("/trades/<trade_id>")
-def trade_by_id(trade_id):
-    result = trades_service.fetch_trade_by_id(trade_id)
-    if result:
-        return result
-    response.status = 404
-    return {"error": "Trade not found"}
-
-
-@app.route("/trades/<trade_id>/valuations")
-def trade_valuations(trade_id):
-    return {"valuations": trades_service.fetch_trade_valuations(trade_id)}
-
-
-@app.route("/trades/<trade_id>/audit-logs")
-def trade_audit_logs(trade_id):
-    pass
-
-
-if __name__ == "__main__":
-    logging.info("Starting Blotter service...")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     audit_logger = AuditLogger("blotter-service")
-    audit_logger.info(
+    await asyncio.to_thread(
+        audit_logger.info,
         EventType.WORKER_STARTED,
         "Valuation worker thread started",
         entity_type="Service",
         correlation_id=None,
     )
-
-    monitoring_thread = threading.Thread(target=worker.valuation_worker)
-    monitoring_thread.daemon = True
-    monitoring_thread.start()
-
+    worker.stop_event.clear()
+    thread = threading.Thread(
+        target=worker.valuation_worker,
+        name="valuation-worker",
+        daemon=False,
+    )
+    thread.start()
     try:
-        app.run(host="0.0.0.0", port=8006, server=ThreadedServer)
+        yield
     finally:
-        audit_logger.info(
+        worker.stop_event.set()
+        worker.close_stream()
+        await asyncio.to_thread(thread.join, _JOIN_TIMEOUT_SECONDS)
+        await asyncio.to_thread(
+            audit_logger.info,
             EventType.WORKER_STOPPED,
             "Valuation worker thread stopped",
             entity_type="Service",
             correlation_id=None,
         )
+
+
+app = FastAPI(lifespan=lifespan)
+install_error_handlers(app)
+register_routes(app)
+
+
+if __name__ == "__main__":
+    logging.info("Starting Blotter service...")
+    uvicorn.run("app:app", host="0.0.0.0", port=8006, workers=1)

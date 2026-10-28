@@ -14,6 +14,7 @@ def blotter():
 @pytest.fixture(autouse=True)
 def _reset(blotter):
     silence_audit(blotter["worker"].audit_logger)
+    blotter["worker"].stop_event.clear()
     yield
 
 
