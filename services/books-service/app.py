@@ -1,126 +1,50 @@
+import asyncio
 import logging
-from bottle import Bottle, request, response  # <-- TUTAJ POPRAWA IMPORTU
+from contextlib import asynccontextmanager
 
-from shared.trading_shared.db import SessionLocal
-from shared.trading_shared.enums import ServiceStatus
+import uvicorn
+from fastapi import FastAPI
+
+from shared.trading_shared.audit import AuditLogger
+from shared.trading_shared.audit_retention import start_retention, stop_retention
+from shared.trading_shared.enums import EventType
 from shared.trading_shared.logging_config import configure_logging
-from sqlalchemy.exc import IntegrityError
 
-import books_manager_service
+from api.body_limit import MaxBodySizeMiddleware
+from api.errors import install_error_handlers
+from routes import register_routes
 
 configure_logging("books-service")
 
-app = Bottle()
 
-db = SessionLocal()
-
-
-@app.route("/health")
-def health():
-    return {
-        "service": "books-service",
-        "status": ServiceStatus.UP.value,
-    }
-
-
-@app.route("/books", method=["GET"])
-def books():
-    return {"books": books_manager_service.get_all_books(db)}
-
-
-@app.route("/books/<book_id>", method=["GET"])
-def get_book(book_id):
-    book = books_manager_service.get_book_by_id(db, book_id)
-    if book:
-        return book
-    else:
-        response.status = 404
-        return {"error": "Book not found"}
-
-
-@app.route("/books", method=["POST"])
-def create_new_books():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    audit_logger = AuditLogger("books-service")
+    await asyncio.to_thread(
+        audit_logger.info,
+        EventType.WORKER_STARTED,
+        "Books service started",
+        entity_type="Service",
+    )
+    start_retention()
     try:
-        payload = request.json
-        logging.info("Received request to create new books with payload: %s", payload)
-
-        if not payload:
-            response.status = 400
-            return {"error": "Invalid JSON payload"}
-
-        if isinstance(payload, dict):
-            payload = [payload]
-
-        created_ids = books_manager_service.create_books_batch(
-            db, payload, created_by="API"
-        )
-
-        response.status = 201
-        return {"message": "Books created successfully", "book_ids": created_ids}
-
-    except ValueError as ve:
-        db.rollback()
-        response.status = 409
-        return {"error": str(ve)}
-    except IntegrityError as ie:
-        db.rollback()
-        logging.warning("Book create unique constraint: %s", ie)
-        response.status = 409
-        return {"error": "A book with this name already exists"}
-    except Exception as e:
-        db.rollback()
-        logging.error(f"Error creating books: {e}")
-        response.status = 500
-        return {"error": "Internal server error"}
+        yield
     finally:
-        db.close()
-
-
-@app.route("/books/<book_id>", method=["PUT"])
-def update_book(book_id):
-    payload = request.json
-    if not payload:
-        response.status = 400
-        return {"error": "Invalid JSON payload"}
-
-    try:
-        book = books_manager_service.update_book(
-            db, book_id, payload, updated_by="API"
+        await asyncio.to_thread(stop_retention)
+        await asyncio.to_thread(
+            audit_logger.info,
+            EventType.WORKER_STOPPED,
+            "Books service stopped",
+            entity_type="Service",
         )
-    except ValueError as ve:
-        db.rollback()
-        response.status = 409
-        return {"error": str(ve)}
-    except IntegrityError as ie:
-        db.rollback()
-        logging.warning("Book update unique constraint: %s", ie)
-        response.status = 409
-        return {"error": "A book with this name already exists"}
-
-    if not book:
-        response.status = 404
-        return {"error": "Book not found"}
-
-    return {"message": f"Book with id {book_id} updated successfully"}
 
 
-@app.route("/books/<book_id>", method=["DELETE"])
-def delete_book(book_id):
-    try:
-        result = books_manager_service.delete_book(db, book_id)
-    except ValueError as ve:
-        db.rollback()
-        response.status = 409
-        return {"error": str(ve)}
-
-    if not result:
-        response.status = 404
-        return {"error": "Book not found"}
-
-    return result
+app = FastAPI(lifespan=lifespan)
+app.add_middleware(MaxBodySizeMiddleware)
+install_error_handlers(app)
+register_routes(app)
 
 
 if __name__ == "__main__":
     logging.info("Starting Books service...")
-
-    app.run(host="0.0.0.0", port=8004)
+    uvicorn.run("app:app", host="0.0.0.0", port=8004, workers=1)

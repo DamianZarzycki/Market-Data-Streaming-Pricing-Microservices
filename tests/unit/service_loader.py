@@ -27,6 +27,7 @@ _COLLIDING = (
     "models",
     "state",
     "routes",
+    "api",
 )
 
 
