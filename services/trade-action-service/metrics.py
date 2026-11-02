@@ -4,6 +4,8 @@ import time
 from collections import deque
 from datetime import datetime, timezone
 
+from shared.trading_shared.enums import ServiceStatus
+
 QUEUE_MAXSIZE = int(os.getenv("TRADE_ACTION_QUEUE_MAXSIZE", "100"))
 RECENT_ACTIONS_LIMIT = 50
 RECENT_REJECTS_LIMIT = 20
@@ -41,6 +43,19 @@ def _prune_throughput(now_ts):
 def set_worker_running(running: bool):
     with _lock:
         _state["worker_running"] = running
+
+
+def is_worker_running() -> bool:
+    with _lock:
+        return _state["worker_running"]
+
+
+def health_payload() -> dict:
+    status = ServiceStatus.UP.value if is_worker_running() else ServiceStatus.DOWN.value
+    return {
+        "service": "trade-action-service",
+        "status": status,
+    }
 
 
 def record_rejected(action_type, client_request_id, symbol, note, latency_ms=1):

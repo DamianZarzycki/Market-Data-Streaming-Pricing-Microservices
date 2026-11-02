@@ -1,96 +1,65 @@
+import asyncio
 import logging
-import threading
-from bottle import Bottle, request, response
+from contextlib import asynccontextmanager
+
+import uvicorn
+from fastapi import FastAPI
+
+import metrics
+import worker
+from db import async_session
+from api.body_limit import MaxBodySizeMiddleware
+from api.errors import install_error_handlers
+from routes import register_routes
 from shared.trading_shared.audit import AuditLogger
 from shared.trading_shared.enums import EventType
 from shared.trading_shared.logging_config import configure_logging
-import trade_action_service
-from custom_server import ThreadedServer
-import worker
 
 configure_logging("trade-action-service")
-app = Bottle()
 
 
-@app.route("/health")
-def health():
-    return trade_action_service.get_health()
-
-
-@app.route("/status", method=["GET"])
-def status():
-    return trade_action_service.get_status()
-
-
-@app.route("/provider-mode", method=["PUT"])
-def put_provider_mode():
-    payload = request.json
-    if not isinstance(payload, dict) or "use_provider_data" not in payload:
-        response.status = 400
-        return {"error": "use_provider_data is required"}
-
-    enabled = payload.get("use_provider_data")
-    if not isinstance(enabled, bool):
-        response.status = 400
-        return {"error": "use_provider_data must be a boolean"}
-
-    trade_action_service.set_use_provider_data(enabled)
-    return {"use_provider_data": trade_action_service.use_provider_data()}
-
-
-@app.route("/trade-actions", method=["POST"])
-def trade_actions():
-    logging.info("New /trade-actions request received")
-    try:
-        data = request.json
-    except Exception as e:
-        logging.error(f"Failed to parse JSON payload: {e}")
-        response.status = 400
-        return {"error": "Invalid JSON format"}
-
-    if not data:
-        response.status = 400
-        return {"error": "Missing payload data"}
-
-    body, status = trade_action_service.submit_trade_action(data)
-    response.status = status
-    return body
-
-
-@app.route("/trade-actions/batch", method=["POST"])
-def trade_action_batch():
-    logging.info("New /trade-actions/batch request received")
-    try:
-        data = request.json
-    except Exception as e:
-        logging.error(f"Failed to parse JSON payload: {e}")
-        response.status = 400
-        return {"error": "Invalid JSON format"}
-
-    if not data or not isinstance(data, list):
-        response.status = 400
-        return {"error": "Payload must be a non-empty list of trade actions"}
-
-    body, status = trade_action_service.submit_trade_action_batch(data)
-    response.status = status
-    return body
-
-
-if __name__ == "__main__":
-    logging.info("Starting Trade Action service...")
+# Async lifespan: FastAPI drives startup and shutdown as a coroutine. The worker
+# is an asyncio task on this loop, cancelled on shutdown. The start/stop service
+# audits still block, so they run through asyncio.to_thread.
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     audit_logger = AuditLogger("trade-action-service")
-    audit_logger.info(
+    await asyncio.to_thread(
+        audit_logger.info,
         EventType.WORKER_STARTED,
         "Trade Action service started",
         entity_type="Service",
         correlation_id=None,
     )
-    trade_action_thread = threading.Thread(target=worker.trade_action_worker)
-    trade_action_thread.daemon = True
-    trade_action_thread.start()
-
+    # Set before the task is scheduled so a health probe during startup is UP.
+    metrics.set_worker_running(True)
+    task = asyncio.create_task(worker.trade_action_worker(), name="trade-action-worker")
     try:
-        app.run(host="0.0.0.0", port=8080, server=ThreadedServer)
+        yield
     finally:
-        audit_logger.info(EventType.WORKER_STOPPED, "Trade Action Worker stopped", entity_type="Service", correlation_id=None)
+        # task.cancel() lands on trade_queue.get() when idle, or is shielded
+        # until the in-flight handler commits.
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        await async_session.dispose()
+        await asyncio.to_thread(
+            audit_logger.info,
+            EventType.WORKER_STOPPED,
+            "Trade Action Worker stopped",
+            entity_type="Service",
+            correlation_id=None,
+        )
 
+
+app = FastAPI(lifespan=lifespan)
+app.add_middleware(MaxBodySizeMiddleware)
+install_error_handlers(app)
+register_routes(app)
+
+
+if __name__ == "__main__":
+    logging.info("Starting Trade Action service...")
+    uvicorn.run("app:app", host="0.0.0.0", port=8080, workers=1)

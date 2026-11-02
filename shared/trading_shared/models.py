@@ -152,6 +152,14 @@ class MarketDataProviderQuote(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
 
 
+Index(
+    "ix_provider_quotes_provider_symbol_received_at",
+    MarketDataProviderQuote.provider,
+    MarketDataProviderQuote.symbol,
+    MarketDataProviderQuote.received_at.desc(),
+)
+
+
 class MarketDataSpotPrice(Base):
     __tablename__ = "market_data_spot_prices"
 
