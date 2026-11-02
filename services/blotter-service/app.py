@@ -1,18 +1,18 @@
-import asyncio
-import logging
-import threading
-from contextlib import asynccontextmanager
-
-import uvicorn
 from fastapi import FastAPI
-
 from shared.trading_shared.audit import AuditLogger
 from shared.trading_shared.enums import EventType
 from shared.trading_shared.logging_config import configure_logging
-
-import worker
+from contextlib import asynccontextmanager
 from api.errors import install_error_handlers
 from routes import register_routes
+
+import asyncio
+import logging
+import threading
+import worker
+import uvicorn
+
+
 
 configure_logging("blotter-service")
 
@@ -27,7 +27,7 @@ async def lifespan(app: FastAPI):
         EventType.WORKER_STARTED,
         "Valuation worker thread started",
         entity_type="Service",
-        correlation_id=None,
+        correlation_id="",
     )
     worker.stop_event.clear()
     thread = threading.Thread(
@@ -47,7 +47,7 @@ async def lifespan(app: FastAPI):
             EventType.WORKER_STOPPED,
             "Valuation worker thread stopped",
             entity_type="Service",
-            correlation_id=None,
+            correlation_id="",
         )
 
 

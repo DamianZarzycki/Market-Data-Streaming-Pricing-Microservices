@@ -6,10 +6,11 @@ from urllib import request
 from cache.valuation_cache_service import ValuationCacheService
 from shared.trading_shared.audit import AuditLogger
 from shared.trading_shared.enums import EventType
+from shared.trading_shared.env import env
 
 MAX_RECONNECT_DELAY = 30
 BASE_RECONNECT_DELAY = 1
-STREAM_URL = "http://pricing-service:8002/valuation-stream"
+STREAM_URL = f"{env('PRICING_SERVICE_URL').rstrip('/')}/valuation-stream"
 STREAM_TIMEOUT_SECONDS = 30
 
 cache_service = ValuationCacheService()

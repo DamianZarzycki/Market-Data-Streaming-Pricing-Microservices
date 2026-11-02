@@ -6,12 +6,13 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from shared.trading_shared.enums import TradeStatus
+from shared.trading_shared.env import env
 from shared.trading_shared.models import Trade
 from shared.trading_shared.repositories import TradeRepository, ValuationRepository
 from shared.trading_shared.serialization import serialize
 from cache.valuation_cache_service import ValuationCacheService
 
-BOOKS_URL = "http://books-service:8004/books"
+BOOKS_URL = f"{env('BOOKS_SERVICE_URL').rstrip('/')}/books"
 BOOKS_TIMEOUT_SECONDS = 2.0
 _BOOKS_CALLS = threading.Semaphore(10)
 

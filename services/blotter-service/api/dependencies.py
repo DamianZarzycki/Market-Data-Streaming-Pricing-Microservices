@@ -1,6 +1,7 @@
 import logging
 from collections.abc import Iterator
 
+from fastapi import status
 from sqlalchemy.orm import Session
 
 from shared.trading_shared.db import SessionLocal
@@ -36,7 +37,7 @@ def get_summary_db() -> Iterator[tuple[dict, Session]]:
         payload = trades_service.fetch_books_payload()
     except Exception:
         logging.exception("Failed to fetch book summary")
-        raise ApiError(500, SUMMARY_FAILED) from None
+        raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, SUMMARY_FAILED) from None
     db = SessionLocal()
     try:
         yield payload, db
