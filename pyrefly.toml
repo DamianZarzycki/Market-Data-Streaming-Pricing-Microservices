@@ -1,4 +1,6 @@
 # Shared package + Alembic live under backend/. Services keep their own
 # pyrefly.toml so sibling modules (worker, app, custom_server) do not collide.
-search-path = ["."]
+# tests/unit is on sys.path when pytest loads a test, which is how
+# `import service_loader` resolves.
+search-path = [".", "tests/unit"]
 python-interpreter-path = ".venv/bin/python"

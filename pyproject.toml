@@ -10,7 +10,7 @@ dependencies = [
     "alembic",
     "bottle",
     "psycopg[binary]",
-    "SQLAlchemy",
+    "sqlalchemy[asyncio]",
 ]
 
 [project.optional-dependencies]

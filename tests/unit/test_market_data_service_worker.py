@@ -1,4 +1,4 @@
-import queue
+import asyncio
 import sys
 import uuid
 
@@ -46,8 +46,8 @@ def test_update_snapshot_replaces_state_and_counts_ticks(market):
 
 def test_publish_tick_to_stream_fans_out_and_allows_zero_subscribers(market):
     worker = market["worker"]
-    first = queue.Queue()
-    second = queue.Queue()
+    first = asyncio.Queue()
+    second = asyncio.Queue()
     worker.subscribers.extend(
         [{"id": "a", "queue": first}, {"id": "b", "queue": second}]
     )
@@ -67,15 +67,15 @@ def test_persist_curves_skips_spots_and_writes_curves(market, monkeypatch):
     worker = market["worker"]
     monkeypatch.setattr(
         worker,
-        "DBSessionManager",
+        "AsyncDBSessionManager",
         lambda: (_ for _ in ()).throw(AssertionError("spots must not open a session")),
     )
-    worker.persist_curves({"ACME": {"symbol": "ACME", "last": 1}})
+    asyncio.run(worker.persist_curves({"ACME": {"symbol": "ACME", "last": 1}}))
 
     db = RecordingDB()
-    monkeypatch.setattr(worker, "DBSessionManager", lambda: db)
+    monkeypatch.setattr(worker, "AsyncDBSessionManager", lambda: db)
     curve_id = str(uuid.uuid4())
-    worker.persist_curves(
+    asyncio.run(worker.persist_curves(
         {
             "USD": {
                 "curve_id": curve_id,
@@ -88,7 +88,7 @@ def test_persist_curves_skips_spots_and_writes_curves(market, monkeypatch):
                 "provider": "FRED",
             }
         }
-    )
+    ))
 
     assert db.commits == 1
     assert len(db.records) == 1
@@ -104,21 +104,23 @@ def test_persist_curves_logs_a_database_error(market, monkeypatch):
     worker = market["worker"]
     monkeypatch.setattr(
         worker,
-        "DBSessionManager",
+        "AsyncDBSessionManager",
         lambda: RecordingDB(commit_error=RuntimeError("db down")),
     )
 
-    worker.persist_curves(
-        {
-            "USD": {
-                "curve_id": str(uuid.uuid4()),
-                "curve_name": "USD_YIELD_CURVE",
-                "curve_type": "YIELD_CURVE",
-                "currency": "USD",
-                "tenors": ["1Y"],
-                "rates": [0.04],
+    asyncio.run(
+        worker.persist_curves(
+            {
+                "USD": {
+                    "curve_id": str(uuid.uuid4()),
+                    "curve_name": "USD_YIELD_CURVE",
+                    "curve_type": "YIELD_CURVE",
+                    "currency": "USD",
+                    "tenors": ["1Y"],
+                    "rates": [0.04],
+                }
             }
-        }
+        )
     )
 
 
@@ -126,10 +128,10 @@ def test_persist_full_snapshot_writes_one_full_row(market, monkeypatch):
     worker = market["worker"]
     worker.global_event_id = 9
     db = RecordingDB()
-    monkeypatch.setattr(worker, "DBSessionManager", lambda: db)
+    monkeypatch.setattr(worker, "AsyncDBSessionManager", lambda: db)
     ticks = {"ACME": {"symbol": "ACME"}}
 
-    worker.persist_full_snapshot(ticks)
+    asyncio.run(worker.persist_full_snapshot(ticks))
 
     assert db.commits == 1
     snapshot = db.records[0]
@@ -142,11 +144,11 @@ def test_persist_full_snapshot_logs_a_database_error(market, monkeypatch):
     worker = market["worker"]
     monkeypatch.setattr(
         worker,
-        "DBSessionManager",
+        "AsyncDBSessionManager",
         lambda: RecordingDB(error=RuntimeError("db down")),
     )
 
-    worker.persist_full_snapshot({"ACME": {"symbol": "ACME"}})
+    asyncio.run(worker.persist_full_snapshot({"ACME": {"symbol": "ACME"}}))
 
 
 def test_market_worker_runs_one_tick_then_stops(market, monkeypatch):
@@ -156,27 +158,42 @@ def test_market_worker_runs_one_tick_then_stops(market, monkeypatch):
 
     monkeypatch.setattr(worker, "generate_market_tick", lambda: (order.append("generate"), ticks)[1])
 
-    def sleep(seconds):
+    async def sleep(seconds):
         order.append("sleep")
         raise StopWorker()
 
-    monkeypatch.setattr(worker.time, "sleep", sleep)
-    monkeypatch.setattr(worker, "persist_curves", lambda data: order.append("curves"))
+    async def persist(data):
+        order.append("curves")
+
+    monkeypatch.setattr(worker.asyncio, "sleep", sleep)
+    monkeypatch.setattr(worker, "persist_curves", persist)
     monkeypatch.setattr(worker, "publish_tick_to_stream", lambda data: order.append("publish"))
 
     with pytest.raises(StopWorker):
-        worker.market_worker()
+        asyncio.run(worker.market_worker())
 
     assert order == ["generate", "curves", "publish", "sleep"]
     assert worker.market_tick_data_state == ticks
     assert worker.db_queue.get_nowait() == ticks
 
 
+def _stop_after_one(real_get):
+    calls = {"n": 0}
+
+    async def get(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise StopWorker()
+        return await real_get(*args, **kwargs)
+
+    return get
+
+
 def test_db_worker_maps_spots_skips_curves_and_flushes(market, monkeypatch):
     worker = market["worker"]
     db = RecordingDB()
-    monkeypatch.setattr(worker, "DBSessionManager", lambda: db)
-    worker.db_queue.put(
+    monkeypatch.setattr(worker, "AsyncDBSessionManager", lambda: db)
+    worker.db_queue.put_nowait(
         {
             "equity": {
                 "event_id": 1,
@@ -192,19 +209,10 @@ def test_db_worker_maps_spots_skips_curves_and_flushes(market, monkeypatch):
             "blank": {"event_id": 5, "symbol": "", "asset_type": "EQUITY"},
         }
     )
-    real_get = worker.db_queue.get
-    calls = {"n": 0}
-
-    def get(*args, **kwargs):
-        calls["n"] += 1
-        if calls["n"] > 1:
-            raise StopWorker()
-        return real_get(*args, **kwargs)
-
-    monkeypatch.setattr(worker.db_queue, "get", get)
+    monkeypatch.setattr(worker.db_queue, "get", _stop_after_one(worker.db_queue.get))
 
     with pytest.raises(StopWorker):
-        worker.db_worker()
+        asyncio.run(worker.db_worker())
 
     assert db.commits == 1
     by_symbol = {record.symbol: record for record in db.records}
@@ -220,32 +228,23 @@ def test_db_worker_clears_the_buffer_when_the_write_fails(market, monkeypatch):
     worker = market["worker"]
     monkeypatch.setattr(
         worker,
-        "DBSessionManager",
+        "AsyncDBSessionManager",
         lambda: RecordingDB(commit_error=RuntimeError("db down")),
     )
-    worker.db_queue.put(
+    worker.db_queue.put_nowait(
         {"equity": {"event_id": 1, "symbol": "ACME", "asset_type": "EQUITY", "last": 10}}
     )
-    real_get = worker.db_queue.get
-    calls = {"n": 0}
-
-    def get(*args, **kwargs):
-        calls["n"] += 1
-        if calls["n"] > 1:
-            raise StopWorker()
-        return real_get(*args, **kwargs)
-
-    monkeypatch.setattr(worker.db_queue, "get", get)
+    monkeypatch.setattr(worker.db_queue, "get", _stop_after_one(worker.db_queue.get))
 
     with pytest.raises(StopWorker):
-        worker.db_worker()
+        asyncio.run(worker.db_worker())
 
 
 def test_metric_worker_updates_health_from_one_event(market, monkeypatch):
     worker = market["worker"]
     sent = {"done": False}
 
-    def get():
+    async def get():
         if not sent["done"]:
             sent["done"] = True
             return {
@@ -260,7 +259,7 @@ def test_metric_worker_updates_health_from_one_event(market, monkeypatch):
     monkeypatch.setattr(worker.metrics_queue, "task_done", lambda: None)
 
     with pytest.raises(StopWorker):
-        worker.metric_worker()
+        asyncio.run(worker.metric_worker())
 
     assert worker.health_stats["generated_events"] == 1
     assert worker.health_stats["last_event_time"] == "t1"

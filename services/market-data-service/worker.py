@@ -1,16 +1,16 @@
+import asyncio
 import json
 import logging
 import os
-import queue
 import threading
-import time
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
 from market_data_simulator import MarketDataSimulator
 
 from shared.trading_shared.audit import AuditLogger
-from shared.trading_shared.db import DBSessionManager
+from shared.trading_shared.db import AsyncDBSessionManager
 from shared.trading_shared.enums import (
     AssetClass,
     CurveType,
@@ -29,10 +29,10 @@ audit_logger = AuditLogger("market-data-service")
 
 stats = {"generated_events": 0, "last_event_time": None}
 global_event_id = 0
-market_tick_data_state = {}
+market_tick_data_state: dict[str, dict[str, Any]] = {}
 
-metrics_queue = queue.Queue()
-db_queue = queue.Queue()
+metrics_queue = asyncio.Queue()
+db_queue = asyncio.Queue()
 health_stats = {
     "service": "market-data-service",
     "status": ServiceStatus.UP.value,
@@ -46,7 +46,8 @@ batch_size = 30
 market_simulator = MarketDataSimulator()
 
 
-def metric_worker():
+# Async task: awaits metrics_queue.get, which suspends this task and holds no thread.
+async def metric_worker():
     global health_stats
 
     local_events_count = 0
@@ -56,7 +57,7 @@ def metric_worker():
 
     while True:
         try:
-            message = metrics_queue.get()
+            message = await metrics_queue.get()
             if message["type"] == "EVENT_GENERATED":
                 logging.info(f"Processing metric: {message['type']} at {message['timestamp']}")
                 local_events_count += 1
@@ -189,7 +190,7 @@ def generate_market_tick():
         (tick for tick in market_tick_data.values() if tick.get("symbol")),
         {},
     )
-    metrics_queue.put(
+    metrics_queue.put_nowait(
         {
             "type": "EVENT_GENERATED",
             "timestamp": current_tmsp,
@@ -222,15 +223,16 @@ def publish_tick_to_stream(market_tick_data):
         for instrument_data in market_tick_data.values():
             msg = f"data: {json.dumps(instrument_data)}\n\n"
             for subscriber in subscribers:
-                subscriber["queue"].put(msg)
+                subscriber["queue"].put_nowait(msg)
 
     logging.info(
         f"Published {len(market_tick_data)} ticks to {len(subscriber_ids)} subscriber(s): {subscriber_ids}"
     )
 
 
-def persist_curves(market_tick_data):
-    """Synchronously saves curves before publish — pricing can immediately call get_curve()."""
+# Async: awaits AsyncSession.commit so the curve row is durable before the tick is published.
+async def persist_curves(market_tick_data):
+    """Saves curves before publish — pricing can immediately call get_curve()."""
     as_of_time = datetime.now(timezone.utc)
     curve_records = []
     for _, data in market_tick_data.items():
@@ -258,22 +260,23 @@ def persist_curves(market_tick_data):
         return
 
     try:
-        with DBSessionManager() as db:
+        async with AsyncDBSessionManager() as db:
             db.market_data.add_all(curve_records)
-            db.commit()
+            await db.commit()
         logging.info(
             f"Flushed {len(curve_records)} curve(s) to MarketDataCurve before stream publish"
         )
     except Exception as e:
         logging.error(f"Failed to flush curves before publish: {e}")
-        audit_logger.error(
+        await audit_logger.aerror(
             EventType.DB_ERROR,
             f"Failed to flush curves before publish: {e}",
             payload={"error": str(e), "curve_count": len(curve_records)},
         )
 
 
-def persist_full_snapshot(market_tick_data):
+# Async: awaits AsyncSession.commit for the FULL snapshot row.
+async def persist_full_snapshot(market_tick_data):
     """Periodic FULL snapshot of the local market state → MarketDataSnapshots."""
     snapshot = MarketDataSnapshot(
         event_id=global_event_id,
@@ -282,27 +285,26 @@ def persist_full_snapshot(market_tick_data):
         payload=market_tick_data,
     )
     try:
-        with DBSessionManager() as db:
+        async with AsyncDBSessionManager() as db:
             db.session.add(snapshot)
-            db.commit()
+            await db.commit()
         logging.info(f"Saved FULL market data snapshot (event_id={global_event_id})")
-        audit_logger.info(
+        await audit_logger.ainfo(
             EventType.SNAPSHOT_GENERATED,
             "FULL market data snapshot persisted",
             payload={"event_id": global_event_id, "instruments": list(market_tick_data.keys())},
         )
     except Exception as e:
         logging.error(f"Failed to persist market data snapshot: {e}")
-        audit_logger.error(
+        await audit_logger.aerror(
             EventType.DB_ERROR,
             f"Failed to persist market data snapshot: {e}",
             payload={"error": str(e)},
         )
 
 
-def market_worker():
-    global _ticks_since_snapshot
-
+# Async task: awaits the curve commit and asyncio.sleep. Neither blocks the event loop.
+async def market_worker():
     interval_ms_str = os.getenv("TICK_INTERVAL_MS", "100")
     interval_ms = int(interval_ms_str)
     sleep_seconds = interval_ms / 1000.0
@@ -310,13 +312,13 @@ def market_worker():
     while True:
         new_ticks = generate_market_tick()
         update_snapshot(new_ticks)
-        persist_curves(new_ticks)
+        await persist_curves(new_ticks)
         publish_tick_to_stream(new_ticks)
-        db_queue.put(new_ticks)
-        time.sleep(sleep_seconds)
+        db_queue.put_nowait(new_ticks)
+        await asyncio.sleep(sleep_seconds)
 
 
-def symbols():
+def symbols() -> dict[str, list[str]]:
     """Return tradeable symbols grouped by asset class.
 
     Derived from the live in-memory snapshot — not the historical spot table.
@@ -326,10 +328,12 @@ def symbols():
     with data_lock:
         snapshot = dict(market_tick_data_state)
 
-    grouped_symbols = {}
+    grouped_symbols: dict[str, list[str]] = {}
     for tick in snapshot.values():
         asset_class = tick.get("asset_type")
         symbol = tick.get("symbol")
+        if not isinstance(asset_class, str) or not isinstance(symbol, str):
+            continue
         if not asset_class or not symbol:
             continue
         bucket = grouped_symbols.setdefault(asset_class, [])
@@ -340,13 +344,14 @@ def symbols():
     return grouped_symbols
 
 
-def db_worker():
-    """Batch only spots. Curves are flushed synchronously in persist_curves."""
+# Async task: awaits the spot-batch handoff, then AsyncSession.commit.
+async def db_worker():
+    """Batch only spots. Curves are committed in persist_curves before publish."""
     buffer = []
     logging.info("DB worker started")
     while True:
         try:
-            new_ticks = db_queue.get()
+            new_ticks = await db_queue.get()
             try:
                 for _, data in new_ticks.items():
                     if "curve_type" in data:
@@ -393,19 +398,19 @@ def db_worker():
                 if len(buffer) >= batch_size or (db_queue.empty() and len(buffer) > 0):
                     try:
                         batch_count = len(buffer)
-                        with DBSessionManager() as db:
+                        async with AsyncDBSessionManager() as db:
                             db.market_data.add_all(buffer)
-                            db.commit()
+                            await db.commit()
                         logging.info(f"Saved {batch_count} spot market data records to DB")
                         buffer.clear()
-                        audit_logger.info(
+                        await audit_logger.ainfo(
                             EventType.DB_CREATE,
                             f"Market data batch saved: {batch_count} records",
                             payload={"record_count": batch_count},
                         )
                     except Exception as e:
                         logging.error(f"Error occurred while saving market data: {e}")
-                        audit_logger.error(
+                        await audit_logger.aerror(
                             EventType.DB_ERROR,
                             f"Failed to save market data batch: {e}",
                             payload={"error": str(e), "batch_size": len(buffer)},
@@ -419,3 +424,58 @@ def db_worker():
                 db_queue.task_done()
         except Exception as e:
             logging.error(f"Error in DB worker: {e}")
+
+
+def health_view():
+    with data_lock:
+        subscriber_count = len(subscribers)
+    return {**health_stats, "active_subscribers": subscriber_count}
+
+
+# Async: the dict copy is in memory; the await is the audit insert on AsyncSession.
+async def snapshot_view() -> dict[str, dict[str, Any]]:
+    with data_lock:
+        market_tick_data = dict(market_tick_data_state)
+    await audit_logger.ainfo(
+        EventType.SNAPSHOT_GENERATED,
+        "Market Data service snapshot generated",
+        entity_type="Service",
+        correlation_id="",
+    )
+    return market_tick_data
+
+
+def subscribe():
+    client_queue = asyncio.Queue()
+    subscriber = {"id": str(uuid.uuid4())[:8], "queue": client_queue}
+    with data_lock:
+        subscribers.append(subscriber)
+        subscriber_count = len(subscribers)
+    logging.info(
+        f"Client {subscriber['id']} connected to stream. "
+        f"Active subscribers: {subscriber_count}"
+    )
+    return subscriber
+
+
+def unsubscribe(subscriber):
+    with data_lock:
+        if subscriber in subscribers:
+            subscribers.remove(subscriber)
+        subscriber_count = len(subscribers)
+    logging.info(
+        f"Client {subscriber['id']} disconnected from stream. "
+        f"Active subscribers: {subscriber_count}"
+    )
+
+
+# Async generator: awaits asyncio.Queue.get, which suspends this task and holds no thread.
+async def iter_subscriber(subscriber):
+    try:
+        while True:
+            message = await subscriber["queue"].get()
+            if message is None:
+                break
+            yield message
+    finally:
+        unsubscribe(subscriber)

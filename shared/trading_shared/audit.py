@@ -1,8 +1,9 @@
 import logging
 
-from shared.trading_shared.db import DBSessionManager
+from shared.trading_shared.db import AsyncDBSessionManager, DBSessionManager
 
 _DBSessionManager = DBSessionManager
+_AsyncDBSessionManager = AsyncDBSessionManager
 from shared.trading_shared.enums import EventType, Severity
 from shared.trading_shared.models import AuditLog
 
@@ -66,7 +67,7 @@ def append_audit(
 
 
 def _target_session(db):
-    if isinstance(db, _DBSessionManager):
+    if isinstance(db, (_DBSessionManager, _AsyncDBSessionManager)):
         return db.session
     return db
 
@@ -154,3 +155,95 @@ class AuditLogger:
         db: "DBSessionManager" = None,
     ) -> None:
         self.write(event_type, Severity.ERROR, message, entity_type, entity_id, correlation_id, payload, db=db)
+
+    async def awrite(
+        self,
+        event_type: EventType,
+        severity: Severity,
+        message: str,
+        entity_type: str = "",
+        entity_id: str = "",
+        correlation_id: str = "",
+        payload: dict = {},
+        db: "AsyncDBSessionManager" = None,
+    ) -> None:
+        if db is not None:
+            append_audit(
+                _target_session(db),
+                event_type,
+                message,
+                service_name=self.service_name,
+                severity=severity,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                correlation_id=correlation_id,
+                payload=payload if isinstance(payload, dict) else None,
+            )
+            return
+
+        audit_entry = AuditLog(
+            service_name=self.service_name,
+            event_type=event_type.value if isinstance(event_type, EventType) else event_type,
+            severity=severity.value if isinstance(severity, Severity) else severity,
+            message=message,
+            entity_type=entity_type,
+            entity_id=str(entity_id) if entity_id is not None else None,
+            correlation_id=str(correlation_id) if correlation_id is not None else None,
+            payload=payload,
+        )
+
+        try:
+            async with AsyncDBSessionManager() as own_db:
+                own_db.audit.add(audit_entry)
+                await own_db.commit()
+        except Exception:
+            logging.exception("Failed to persist audit log")
+
+    async def ainfo(
+        self,
+        event_type: EventType,
+        message: str,
+        entity_type: str = "",
+        entity_id: str = "",
+        correlation_id: str = "",
+        payload: dict = "",
+        db: "AsyncDBSessionManager" = None,
+    ) -> None:
+        await self.awrite(
+            event_type, Severity.INFO, message, entity_type, entity_id, correlation_id, payload, db=db
+        )
+
+    async def awarning(
+        self,
+        event_type: EventType,
+        message: str,
+        entity_type: str = "",
+        entity_id: str = "",
+        correlation_id: str = "",
+        payload: dict = {},
+        db: "AsyncDBSessionManager" = None,
+    ) -> None:
+        await self.awrite(
+            event_type,
+            Severity.WARNING,
+            message,
+            entity_type,
+            entity_id,
+            correlation_id,
+            payload,
+            db=db,
+        )
+
+    async def aerror(
+        self,
+        event_type: EventType,
+        message: str,
+        entity_type: str = "",
+        entity_id: str = "",
+        correlation_id: str = "",
+        payload: dict = {},
+        db: "AsyncDBSessionManager" = None,
+    ) -> None:
+        await self.awrite(
+            event_type, Severity.ERROR, message, entity_type, entity_id, correlation_id, payload, db=db
+        )

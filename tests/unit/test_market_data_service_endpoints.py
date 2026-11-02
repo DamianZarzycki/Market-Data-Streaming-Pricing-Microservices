@@ -1,41 +1,57 @@
+import asyncio
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import Any, cast
 
-import pytest
+from fastapi.testclient import TestClient
 
-from service_loader import collect, invoke, load_service, read_json
+from service_loader import load_service
 
-
-@pytest.fixture(scope="module")
-def market():
-    app = load_service("market-data-service")
-    return {"app": app, "worker": sys.modules["worker"]}
-
-
-@pytest.fixture(autouse=True)
-def _reset(market):
-    worker = market["worker"]
-    worker.subscribers.clear()
-    worker.market_tick_data_state = {}
-    worker.health_stats = {
-        "service": "market-data-service",
-        "status": "UP",
-        "generated_events": 0,
-        "last_event_time": None,
-        "last_symbol": None,
-        "last_asset_type": None,
-    }
-    yield
+_HEALTH = {
+    "service": "market-data-service",
+    "status": "UP",
+    "generated_events": 0,
+    "last_event_time": None,
+    "last_symbol": None,
+    "last_asset_type": None,
+}
 
 
-def test_health_includes_active_subscribers(market):
-    worker = market["worker"]
-    worker.health_stats["generated_events"] = 7
-    worker.health_stats["last_symbol"] = "ACME"
-    worker.subscribers.append({"id": "abc", "queue": None})
+@contextmanager
+def _client() -> Iterator[tuple[TestClient, Any]]:
+    app_module = load_service("market-data-service")
+    # Loaded by path at runtime, so the static type is a plain module.
+    worker_mod = cast(Any, sys.modules["worker"])
 
-    status, _, body = read_json(market["app"].app, "/health")
+    async def _idle():
+        await asyncio.Event().wait()
 
-    assert status == 200
+    async def _quiet(*args, **kwargs):
+        return None
+
+    worker_mod.market_worker = _idle
+    worker_mod.metric_worker = _idle
+    worker_mod.db_worker = _idle
+    worker_mod.audit_logger.ainfo = _quiet
+    worker_mod.audit_logger.aerror = _quiet
+    with TestClient(app_module.app) as client:
+        worker_mod.subscribers.clear()
+        worker_mod.market_tick_data_state = {}
+        worker_mod.health_stats = dict(_HEALTH)
+        yield client, worker_mod
+
+
+def test_health_includes_active_subscribers():
+    with _client() as (client, worker_mod):
+        worker_mod.health_stats["generated_events"] = 7
+        worker_mod.health_stats["last_symbol"] = "ACME"
+        worker_mod.subscribers.append({"id": "abc", "queue": None})
+
+        response = client.get("/health")
+
+    assert response.status_code == 200
+    body = response.json()
     assert body["service"] == "market-data-service"
     assert body["status"] == "UP"
     assert body["generated_events"] == 7
@@ -43,66 +59,64 @@ def test_health_includes_active_subscribers(market):
     assert body["active_subscribers"] == 1
 
 
-def test_symbols_groups_snapshot_by_asset_class(market):
-    market["worker"].market_tick_data_state = {
-        "ACME": {"asset_type": "EQUITY", "symbol": "ACME"},
-        "MSFT": {"asset_type": "EQUITY", "symbol": "MSFT"},
-        "EURUSD": {"asset_type": "FX", "symbol": "EURUSD"},
-        "blank-class": {"asset_type": "", "symbol": "NOPE"},
-        "blank-symbol": {"asset_type": "BOND", "symbol": ""},
-        "dup": {"asset_type": "EQUITY", "symbol": "ACME"},
-    }
+def test_symbols_groups_snapshot_by_asset_class():
+    with _client() as (client, worker_mod):
+        worker_mod.market_tick_data_state = {
+            "ACME": {"asset_type": "EQUITY", "symbol": "ACME"},
+            "MSFT": {"asset_type": "EQUITY", "symbol": "MSFT"},
+            "EURUSD": {"asset_type": "FX", "symbol": "EURUSD"},
+            "blank-class": {"asset_type": "", "symbol": "NOPE"},
+            "blank-symbol": {"asset_type": "BOND", "symbol": ""},
+            "dup": {"asset_type": "EQUITY", "symbol": "ACME"},
+        }
 
-    status, _, body = read_json(market["app"].app, "/symbols")
+        response = client.get("/symbols")
 
-    assert status == 200
-    assert body == {"EQUITY": ["ACME", "MSFT"], "FX": ["EURUSD"]}
-
-
-def test_snapshot_returns_a_copy_and_skips_the_database(market, monkeypatch):
-    created = []
-
-    class SilentAudit:
-        def __init__(self, service_name):
-            created.append(service_name)
-
-        def info(self, *args, **kwargs):
-            return None
-
-    monkeypatch.setattr(market["app"], "AuditLogger", SilentAudit)
-    market["worker"].market_tick_data_state = {"ACME": {"symbol": "ACME", "last": 10}}
-
-    status, _, body = read_json(market["app"].app, "/snapshot")
-    assert status == 200
-    assert body == {"ACME": {"symbol": "ACME", "last": 10}}
-    assert created == ["market-data-service"]
-
-    view = market["app"].snapshot()
-    view["NEW"] = {"symbol": "NEW"}
-    assert "NEW" not in market["worker"].market_tick_data_state
+    assert response.status_code == 200
+    assert response.json() == {"EQUITY": ["ACME", "MSFT"], "FX": ["EURUSD"]}
 
 
-def test_stream_yields_one_message_and_unsubscribes(market, monkeypatch):
-    seen = {}
+def test_snapshot_returns_a_copy_and_skips_the_database():
+    with _client() as (client, worker_mod):
+        seen = []
 
-    class ScriptedQueue:
-        def get(self):
-            seen["subscribers"] = len(market["worker"].subscribers)
-            if "sent" not in seen:
-                seen["sent"] = True
-                return 'data: {"symbol": "ACME"}\n\n'
-            raise RuntimeError("stop stream")
+        async def ainfo(*args, **kwargs):
+            seen.append(args)
 
-    monkeypatch.setattr(market["app"].queue, "Queue", lambda: ScriptedQueue())
+        worker_mod.audit_logger.ainfo = ainfo
+        worker_mod.market_tick_data_state = {"ACME": {"symbol": "ACME", "last": 10}}
 
-    status, headers, iterator = invoke(market["app"].app, "/stream")
-    assert status == 200
-    assert headers["content-type"].startswith("text/event-stream")
-    assert len(market["worker"].subscribers) == 1
+        response = client.get("/snapshot")
 
-    body, error = collect(iterator)
+        assert response.status_code == 200
+        assert response.json() == {"ACME": {"symbol": "ACME", "last": 10}}
+        assert len(seen) == 1
 
-    assert error is None
-    assert body == b'data: {"symbol": "ACME"}\n\n'
+        view = asyncio.run(worker_mod.snapshot_view())
+        view["NEW"] = {"symbol": "NEW"}
+        assert "NEW" not in worker_mod.market_tick_data_state
+
+
+def test_stream_yields_one_message_and_unsubscribes(monkeypatch):
+    with _client() as (client, worker_mod):
+        message = 'data: {"symbol": "ACME"}\n\n'
+        seen = {}
+
+        class ScriptedQueue(asyncio.Queue):
+            async def get(self):
+                # subscribe() has already stored this queue on the subscriber.
+                seen["subscribers"] = len(worker_mod.subscribers)
+                if not getattr(self, "_sent", False):
+                    self._sent = True
+                    return message
+                return None
+
+        # Restored after the test so later imports still get asyncio.Queue.
+        monkeypatch.setattr(worker_mod.asyncio, "Queue", ScriptedQueue)
+        response = client.get("/stream")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.content == message.encode()
     assert seen["subscribers"] == 1
-    assert market["worker"].subscribers == []
+    assert worker_mod.subscribers == []
