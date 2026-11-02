@@ -1,4 +1,5 @@
-from sqlalchemy import func
+from sqlalchemy import func, select
+from sqlalchemy.orm import load_only
 
 from shared.trading_shared.enums import TradeStatus
 from shared.trading_shared.models import (
@@ -72,6 +73,27 @@ class TradeRepository:
 
     def add(self, trade):
         self.db_session.add(trade)
+
+    # Async read: awaits AsyncSession.execute. Sync services keep get_active_trades.
+    async def list_active_for_pricing(self):
+        """Every ACTIVE trade, with only the columns the pricer reads.
+
+        get_trades paginates (default 50). Pricing has to mark the whole book.
+        """
+        statement = select(
+            Trade.trade_id,
+            Trade.book_id,
+            Trade.symbol,
+            Trade.asset_class,
+            Trade.side,
+            Trade.quantity,
+            Trade.trade_price,
+            Trade.trade_currency,
+            Trade.metadata_payload,
+            Trade.market_data_provider,
+        ).where(Trade.status == TradeStatus.ACTIVE.value)
+        result = await self.db_session.execute(statement)
+        return result.all()
 
 
 class ValuationRepository:
@@ -189,6 +211,45 @@ class MarketDataRepository:
             func.jsonb_array_length(MarketDataCurve.tenors) > 0,
         )
 
+    def _curves_with_tenors_select(self):
+        """Same tenor filter as _curves_with_tenors, for AsyncSession.execute."""
+        return select(MarketDataCurve).where(
+            func.jsonb_typeof(MarketDataCurve.tenors) == "array",
+            func.jsonb_array_length(MarketDataCurve.tenors) > 0,
+        )
+
+    # Async read: awaits AsyncSession.execute. Sync services keep get_curve.
+    async def get_curve_async(self, currency, curve_type, provider=None, exclude_providers=None):
+        statement = self._curves_with_tenors_select().where(
+            MarketDataCurve.currency == currency,
+            MarketDataCurve.curve_type == curve_type,
+        )
+        if provider:
+            statement = statement.where(MarketDataCurve.provider == provider)
+        elif exclude_providers:
+            statement = statement.where(~MarketDataCurve.provider.in_(exclude_providers))
+        statement = statement.order_by(MarketDataCurve.as_of_time.desc()).limit(1)
+        result = await self.db_session.execute(statement)
+        return result.scalars().first()
+
+    # Async read: awaits AsyncSession.execute. Sync services keep get_latest_curves_by_currency.
+    async def get_latest_curves_by_currency_async(self, curve_type, exclude_providers=None):
+        """Latest row per currency for a single curve_type (e.g. YIELD_CURVE)."""
+        statement = self._curves_with_tenors_select().where(
+            MarketDataCurve.curve_type == curve_type,
+        )
+        if exclude_providers:
+            statement = statement.where(~MarketDataCurve.provider.in_(exclude_providers))
+        statement = (
+            statement.distinct(MarketDataCurve.currency)
+            .order_by(
+                MarketDataCurve.currency,
+                MarketDataCurve.as_of_time.desc(),
+            )
+        )
+        result = await self.db_session.execute(statement)
+        return result.scalars().all()
+
     def add_all(self, market_data_list):
         logging.info(f"Attempt to add {len(market_data_list)} market data records to DB")
         self.db_session.add_all(market_data_list)
@@ -224,7 +285,7 @@ class MarketDataProviderQuoteRepository:
     def add(self, quote: MarketDataProviderQuote):
         self.db_session.add(quote)
 
-    def get_latest(self, provider, symbol):
+    def _latest_query(self, provider, symbol):
         return (
             self.db_session.query(MarketDataProviderQuote)
             .filter(
@@ -232,6 +293,39 @@ class MarketDataProviderQuoteRepository:
                 MarketDataProviderQuote.symbol == symbol,
             )
             .order_by(MarketDataProviderQuote.received_at.desc())
+        )
+
+    def get_latest(self, provider, symbol):
+        """Full quote row, including `raw_payload`. Snapshot reads use this."""
+        return self._latest_query(provider, symbol).first()
+
+    def get_latest_freshness(self, provider, symbol):
+        """Age check. Skips `raw_payload` and the bid/ask book."""
+        return (
+            self._latest_query(provider, symbol)
+            .options(
+                load_only(
+                    MarketDataProviderQuote.asset_class,
+                    MarketDataProviderQuote.received_at,
+                    MarketDataProviderQuote.provider_timestamp,
+                )
+            )
+            .first()
+        )
+
+    def get_latest_close_price(self, provider, symbol):
+        """Close pricing. Skips `raw_payload`."""
+        return (
+            self._latest_query(provider, symbol)
+            .options(
+                load_only(
+                    MarketDataProviderQuote.bid,
+                    MarketDataProviderQuote.ask,
+                    MarketDataProviderQuote.last,
+                    MarketDataProviderQuote.provider_timestamp,
+                    MarketDataProviderQuote.received_at,
+                )
+            )
             .first()
         )
 

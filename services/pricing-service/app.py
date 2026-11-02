@@ -1,218 +1,89 @@
-import json
-import queue
-import threading
+import asyncio
 import logging
-from bottle import Bottle, HTTPResponse, response
-from custom_server import ThreadedServer
+from contextlib import asynccontextmanager
 
-from shared.trading_shared.audit import AuditLogger
+import uvicorn
+from fastapi import FastAPI
+
+from api.errors import install_error_handlers
+from routes import register_routes
+from shared.trading_shared.db import dispose_async_engine
 from shared.trading_shared.enums import EventType
 from shared.trading_shared.logging_config import configure_logging
+
 import worker
-import calculation_service
-from books import book_metrics_service
 
 configure_logging("pricing-service")
-app = Bottle()
+
+_WORKER_AUDIT = (
+    ("pricing-worker", "pricing_worker", "Market thread started", "Market thread stopped"),
+    ("metrics-worker", "metrics_worker", "Metrics thread started", "Metrics thread stopped"),
+    (
+        "cache-refresh-worker",
+        "cache_refresh_worker",
+        "Cache refresh thread started",
+        "Cache refresh thread stopped",
+    ),
+    (
+        "valuation-worker",
+        "valuation_worker",
+        "Valuation thread started",
+        "Valuation thread stopped",
+    ),
+    (
+        "provider-pricing-worker",
+        "provider_pricing_worker",
+        "Provider pricing thread started",
+        "Provider pricing thread stopped",
+    ),
+    (
+        "curve-pricing-worker",
+        "curve_pricing_worker",
+        "Curve pricing thread started",
+        "Curve pricing thread stopped",
+    ),
+)
 
 
-@app.route("/health")
-def health():
-    with worker.stats_lock:
-        return {
-            "service": "pricing-service",
-            "status": "UP",
-            "market_data_connection": worker.connection_status,
-            "received_events": worker.events_counter,
-            "last_market_event_time": worker.last_market_event_time,
-            "last_pricing_time": worker.last_pricing_time,
-            "last_valuation_symbol": worker.last_valuation_symbol,
-            "last_valuation_asset_class": worker.last_valuation_asset_class,
-        }
-
-
-@app.route("/valuations")
-def valuations():
-    with calculation_service.pricing_lock:
-        return calculation_service.valuations_store.copy()
-
-
-@app.route("/valuations/<trade_id>")
-def valuations_by_trade_id(trade_id):
-    with calculation_service.pricing_lock:
-        valuation = calculation_service.valuations_store.get(trade_id)
-
-    if valuation is not None:
-        return {"trade_id": trade_id, **valuation}
-    else:
-        error_body = json.dumps({"error": "Valuation not found for trade_id: " + trade_id})
-        return HTTPResponse(
-            status=404, body=error_body, headers={"Content-Type": "application/json"}
+# Async: awaits audit inserts, worker cancellation, AsyncClient.aclose, and engine dispose.
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    worker.open_http()
+    tasks = []
+    for name, attr, started, _stopped in _WORKER_AUDIT:
+        await worker.audit_logger.ainfo(
+            EventType.WORKER_STARTED,
+            started,
+            entity_type="Service",
+            correlation_id="",
         )
+        tasks.append(asyncio.create_task(getattr(worker, attr)(), name=name))
+    try:
+        yield
+    finally:
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        for _name, _attr, _started, stopped in _WORKER_AUDIT:
+            await worker.audit_logger.ainfo(
+                EventType.WORKER_STOPPED,
+                stopped,
+                entity_type="Service",
+                correlation_id="",
+            )
+        await worker.close_http()
+        await dispose_async_engine()
 
 
-@app.route("/book-metrics")
-def book_metrics():
-    """Return the latest alpha/beta metrics for every book."""
-    return {"benchmark": "MARKET_INDEX", "books": book_metrics_service.get_all_metrics()}
-
-
-@app.route("/book-metrics/<book_id>")
-def book_metrics_by_id(book_id):
-    metrics = book_metrics_service.get_metrics_for_book(book_id)
-    if metrics is not None:
-        return metrics
-
-    error_body = json.dumps({"error": "No metrics available for book_id: " + book_id})
-    return HTTPResponse(status=404, body=error_body, headers={"Content-Type": "application/json"})
-
-
-@app.route("/valuation-stream")
-def valuation_stream():
-    logging.info("Client connected to /valuation-stream for SSE.")
-    response.content_type = "text/event-stream"
-
-    client_queue = queue.Queue()
-    with calculation_service.sse_subscribers_lock:
-        calculation_service.sse_subscribers.append(client_queue)
-
-    def event_generator():
-        try:
-            # Send current valuations immediately so the client doesn't wait for the next tick
-            with calculation_service.pricing_lock:
-                snapshot = list(calculation_service.valuations_store.values())
-            for valuation_data in snapshot:
-                try:
-                    payload = json.dumps(valuation_data)
-                except Exception as e:
-                    logging.error(f"Error serializing valuation snapshot for SSE: {e}")
-                    continue
-                yield f"event: valuation_update\ndata: {payload}\n\n"
-
-            while True:
-                valuation_data = client_queue.get()
-                try:
-                    logging.info(
-                        f"Streaming valuation update for trade {valuation_data.get('trade_id')}"
-                    )
-                    yield f"event: valuation_update\ndata: {json.dumps(valuation_data)}\n\n"
-                except Exception as e:
-                    logging.error(f"Error serializing valuation for SSE: {e}")
-                finally:
-                    client_queue.task_done()
-        finally:
-            with calculation_service.sse_subscribers_lock:
-                calculation_service.sse_subscribers.remove(client_queue)
-            logging.info("Client disconnected from /valuation-stream.")
-
-    return event_generator()
+app = FastAPI(lifespan=lifespan)
+install_error_handlers(app)
+register_routes(app)
 
 
 if __name__ == "__main__":
     logging.info("Starting Pricing Service...")
-    audit_logger = AuditLogger("pricing-service")
-    audit_logger.info(
-        EventType.WORKER_STARTED,
-        "Market thread started",
-        entity_type="Service",
-        correlation_id=None,
-    )
-
-    market_thread = threading.Thread(target=worker.pricing_worker)
-    market_thread.daemon = True
-    market_thread.start()
-
-    audit_logger.info(
-        EventType.WORKER_STARTED,
-        "Metrics thread started",
-        entity_type="Service",
-        correlation_id=None,
-    )
-
-    metrics_thread = threading.Thread(target=worker.metrics_worker)
-    metrics_thread.daemon = True
-    metrics_thread.start()
-
-    audit_logger.info(
-        EventType.WORKER_STARTED,
-        "Cache refresh thread started",
-        entity_type="Service",
-        correlation_id=None,
-    )
-
-    cache_thread = threading.Thread(target=worker.cache_refresh_worker)
-    cache_thread.daemon = True
-    cache_thread.start()
-
-    audit_logger.info(
-        EventType.WORKER_STARTED,
-        "Valuation thread started",
-        entity_type="Service",
-        correlation_id=None,
-    )
-
-    valuation_thread = threading.Thread(target=worker.valuation_worker)
-    valuation_thread.daemon = True
-    valuation_thread.start()
-
-    audit_logger.info(
-        EventType.WORKER_STARTED,
-        "Provider pricing thread started",
-        entity_type="Service",
-        correlation_id=None,
-    )
-
-    provider_pricing_thread = threading.Thread(target=worker.provider_pricing_worker)
-    provider_pricing_thread.daemon = True
-    provider_pricing_thread.start()
-
-    audit_logger.info(
-        EventType.WORKER_STARTED,
-        "Curve pricing thread started",
-        entity_type="Service",
-        correlation_id=None,
-    )
-
-    curve_pricing_thread = threading.Thread(target=worker.curve_pricing_worker)
-    curve_pricing_thread.daemon = True
-    curve_pricing_thread.start()
-
-    try:
-        app.run(host="0.0.0.0", port=8002, server=ThreadedServer)
-    finally:
-        audit_logger.info(
-            EventType.WORKER_STOPPED,
-            "Market thread stopped",
-            entity_type="Service",
-            correlation_id=None,
-        )
-        audit_logger.info(
-            EventType.WORKER_STOPPED,
-            "Metrics thread stopped",
-            entity_type="Service",
-            correlation_id=None,
-        )
-        audit_logger.info(
-            EventType.WORKER_STOPPED,
-            "Cache refresh thread stopped",
-            entity_type="Service",
-            correlation_id=None,
-        )
-        audit_logger.info(
-            EventType.WORKER_STOPPED,
-            "Valuation thread stopped",
-            entity_type="Service",
-            correlation_id=None,
-        )
-        audit_logger.info(
-            EventType.WORKER_STOPPED,
-            "Provider pricing thread stopped",
-            entity_type="Service",
-            correlation_id=None,
-        )
-        audit_logger.info(
-            EventType.WORKER_STOPPED,
-            "Curve pricing thread stopped",
-            entity_type="Service",
-            correlation_id=None,
-        )
+    uvicorn.run("app:app", host="0.0.0.0", port=8002, workers=1)

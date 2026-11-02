@@ -1,9 +1,14 @@
+import asyncio
 import json
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import Any, cast
 
 import pytest
+from fastapi.testclient import TestClient
 
-from service_loader import collect, invoke, load_service, read_json
+from service_loader import load_service
 
 
 @pytest.fixture(scope="module")
@@ -17,11 +22,34 @@ def pricing():
     }
 
 
+@contextmanager
+def _client(pricing) -> Iterator[tuple[TestClient, dict]]:
+    worker_mod = cast(Any, pricing["worker"])
+
+    async def _idle():
+        await asyncio.Event().wait()
+
+    async def _quiet(*args, **kwargs):
+        return None
+
+    worker_mod.pricing_worker = _idle
+    worker_mod.metrics_worker = _idle
+    worker_mod.cache_refresh_worker = _idle
+    worker_mod.valuation_worker = _idle
+    worker_mod.provider_pricing_worker = _idle
+    worker_mod.curve_pricing_worker = _idle
+    worker_mod.audit_logger.ainfo = _quiet
+    worker_mod.audit_logger.aerror = _quiet
+    with TestClient(pricing["app"].app) as client:
+        yield client, pricing
+
+
 @pytest.fixture(autouse=True)
 def _reset(pricing):
     calculation = pricing["calculation"]
-    calculation.valuations_store.clear()
-    calculation.sse_subscribers.clear()
+    calculation.valuation_state.valuations_store.clear()
+    calculation.valuation_state.sse_subscribers.clear()
+    calculation.valuation_state.set_external_yield_currencies(set())
     pricing["book_metrics"].metrics_store.clear()
     worker = pricing["worker"]
     worker.connection_status = "DISCONNECTED"
@@ -42,9 +70,11 @@ def test_health_reports_worker_counters(pricing):
     worker.last_valuation_symbol = "ACME"
     worker.last_valuation_asset_class = "EQUITY"
 
-    status, _, body = read_json(pricing["app"].app, "/health")
+    with _client(pricing) as (client, _loaded):
+        response = client.get("/health")
 
-    assert status == 200
+    assert response.status_code == 200
+    body = response.json()
     assert body["service"] == "pricing-service"
     assert body["status"] == "UP"
     assert body["market_data_connection"] == "CONNECTED"
@@ -56,40 +86,45 @@ def test_health_reports_worker_counters(pricing):
 
 
 def test_valuations_returns_a_copy_of_the_store(pricing):
-    status, _, body = read_json(pricing["app"].app, "/valuations")
-    assert status == 200
-    assert body == {}
+    with _client(pricing) as (client, loaded):
+        response = client.get("/valuations")
+        assert response.status_code == 200
+        assert response.json() == {}
 
-    pricing["calculation"].valuations_store["t1"] = {"fair_value": 1.5, "symbol": "ACME"}
-    status, _, body = read_json(pricing["app"].app, "/valuations")
-    assert status == 200
-    assert body == {"t1": {"fair_value": 1.5, "symbol": "ACME"}}
+        loaded["calculation"].valuation_state.valuations_store["t1"] = {"fair_value": 1.5, "symbol": "ACME"}
+        response = client.get("/valuations")
+        assert response.status_code == 200
+        assert response.json() == {"t1": {"fair_value": 1.5, "symbol": "ACME"}}
 
-    snapshot = pricing["app"].valuations()
-    snapshot["extra"] = {"fair_value": 9}
-    assert "extra" not in pricing["calculation"].valuations_store
+        snapshot = loaded["calculation"].valuation_feed.valuations_view()
+        snapshot["extra"] = {"fair_value": 9}
+        assert "extra" not in loaded["calculation"].valuation_state.valuations_store
 
 
 def test_valuation_by_trade_id_found_and_missing(pricing):
-    pricing["calculation"].valuations_store["t1"] = {"fair_value": 1.5, "symbol": "ACME"}
+    pricing["calculation"].valuation_state.valuations_store["t1"] = {"fair_value": 1.5, "symbol": "ACME"}
 
-    status, _, body = read_json(pricing["app"].app, "/valuations/t1")
-    assert status == 200
-    assert body["trade_id"] == "t1"
-    assert body["fair_value"] == 1.5
-    assert body["symbol"] == "ACME"
+    with _client(pricing) as (client, _loaded):
+        response = client.get("/valuations/t1")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["trade_id"] == "t1"
+        assert body["fair_value"] == 1.5
+        assert body["symbol"] == "ACME"
 
-    status, _, body = read_json(pricing["app"].app, "/valuations/missing")
-    assert status == 404
-    assert body == {"error": "Valuation not found for trade_id: missing"}
+        missing = client.get("/valuations/missing")
+        assert missing.status_code == 404
+        assert missing.json() == {"error": "Valuation not found for trade_id: missing"}
 
 
 def test_book_metrics_lists_every_book(pricing):
     pricing["book_metrics"].metrics_store["b1"] = {"alpha": 0.1, "beta": 1.2}
 
-    status, _, body = read_json(pricing["app"].app, "/book-metrics")
+    with _client(pricing) as (client, _loaded):
+        response = client.get("/book-metrics")
 
-    assert status == 200
+    assert response.status_code == 200
+    body = response.json()
     assert body["benchmark"] == "MARKET_INDEX"
     assert body["books"] == {"b1": {"alpha": 0.1, "beta": 1.2}}
 
@@ -97,50 +132,49 @@ def test_book_metrics_lists_every_book(pricing):
 def test_book_metrics_by_id_found_and_missing(pricing):
     pricing["book_metrics"].metrics_store["b1"] = {"alpha": 0.1, "beta": 1.2}
 
-    status, _, body = read_json(pricing["app"].app, "/book-metrics/b1")
-    assert status == 200
-    assert body == {"alpha": 0.1, "beta": 1.2}
+    with _client(pricing) as (client, _loaded):
+        found = client.get("/book-metrics/b1")
+        assert found.status_code == 200
+        assert found.json() == {"alpha": 0.1, "beta": 1.2}
 
-    status, _, body = read_json(pricing["app"].app, "/book-metrics/missing")
-    assert status == 404
-    assert body == {"error": "No metrics available for book_id: missing"}
+        missing = client.get("/book-metrics/missing")
+        assert missing.status_code == 404
+        assert missing.json() == {"error": "No metrics available for book_id: missing"}
 
 
 def test_valuation_stream_snapshots_then_one_update(pricing, monkeypatch):
     calculation = pricing["calculation"]
-    calculation.valuations_store["t1"] = {"trade_id": "t1", "fair_value": 1.5}
-    calculation.valuations_store["bad"] = {"trade_id": "bad-id", "blob": {1, 2}}
+    calculation.valuation_state.valuations_store["t1"] = {"trade_id": "t1", "fair_value": 1.5}
+    calculation.valuation_state.valuations_store["bad"] = {"trade_id": "bad-id", "blob": {1, 2}}
+    seen = {}
 
-    live = {"trade_id": "live", "fair_value": 3}
-
-    class ScriptedQueue:
-        def __init__(self):
+    class ScriptedQueue(asyncio.Queue):
+        def __init__(self, maxsize=0):
+            super().__init__(maxsize=maxsize)
             self.gets = 0
 
-        def get(self):
+        async def get(self):
             self.gets += 1
             if self.gets == 1:
-                return live
-            raise RuntimeError("stop stream")
+                seen["subscribers"] = len(calculation.valuation_state.sse_subscribers)
+                return {"trade_id": "live", "fair_value": 3}
+            return None
 
-        def task_done(self):
-            pass
+    monkeypatch.setattr(sys.modules["calculation.valuation_feed"].asyncio, "Queue", ScriptedQueue)
 
-    monkeypatch.setattr(pricing["app"].queue, "Queue", ScriptedQueue)
+    with _client(pricing) as (client, _loaded):
+        response = client.get("/valuation-stream")
 
-    status, headers, iterator = invoke(pricing["app"].app, "/valuation-stream")
-    assert status == 200
-    assert headers["content-type"].startswith("text/event-stream")
-    assert len(calculation.sse_subscribers) == 1
-
-    body, error = collect(iterator)
-
-    assert isinstance(error, RuntimeError)
-    assert len(calculation.sse_subscribers) == 0
-    text = body.decode()
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert seen["subscribers"] == 1
+    assert calculation.valuation_state.sse_subscribers == []
+    text = response.text
     assert "bad-id" not in text
     frames = [frame for frame in text.split("\n\n") if frame.strip()]
-    assert frames[0] == 'event: valuation_update\ndata: ' + json.dumps(
+    assert frames[0] == "event: valuation_update\ndata: " + json.dumps(
         {"trade_id": "t1", "fair_value": 1.5}
     )
-    assert frames[1] == 'event: valuation_update\ndata: ' + json.dumps(live)
+    assert frames[1] == "event: valuation_update\ndata: " + json.dumps(
+        {"trade_id": "live", "fair_value": 3}
+    )

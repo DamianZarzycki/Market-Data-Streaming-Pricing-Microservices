@@ -15,6 +15,7 @@ SERVICES_ROOT = BACKEND_ROOT / "services"
 _COLLIDING = (
     "app",
     "worker",
+    "calculation",
     "calculation_service",
     "trades_service",
     "books",
@@ -28,6 +29,10 @@ _COLLIDING = (
     "state",
     "routes",
     "api",
+    "metrics",
+    "actions",
+    "processing",
+    "db",
 )
 
 
@@ -155,9 +160,30 @@ class RecordingDB:
         if self.commit_error:
             raise self.commit_error
         self.commits += 1
+        return _Immediate()
+
+    async def __aenter__(self):
+        return self.__enter__()
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return self.__exit__(exc_type, exc, tb)
+
+
+class _Immediate:
+    """Await finishes immediately. The commit side effect already ran."""
+
+    def __await__(self):
+        return iter(())
 
 
 def silence_audit(audit_logger):
     audit_logger.info = lambda *args, **kwargs: None
     audit_logger.error = lambda *args, **kwargs: None
     audit_logger.warning = lambda *args, **kwargs: None
+
+    async def _quiet(*args, **kwargs):
+        return None
+
+    audit_logger.ainfo = _quiet
+    audit_logger.aerror = _quiet
+    audit_logger.awarning = _quiet

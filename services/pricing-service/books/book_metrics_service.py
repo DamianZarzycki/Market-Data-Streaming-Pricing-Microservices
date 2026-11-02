@@ -14,6 +14,9 @@ For a book with a rolling window of returns:
 Because covariance and variance share the same denominator, using the
 population estimator (divide by N) is equivalent to the sample estimator
 (divide by N-1) for beta, so we use the population form for both.
+
+A book can hold more than one currency. Fair values are summed per currency
+and the series uses the currency with the largest absolute value.
 """
 
 import logging
@@ -35,7 +38,8 @@ book_metrics_cache_lock = threading.Lock()
 book_returns = defaultdict(lambda: deque(maxlen=WINDOW))
 
 # Last sampled values, used to turn levels into simple returns.
-last_book_value = {}          # book_id -> float (last book market value)
+# book_id -> (currency, last book market value)
+last_book_value = {}
 last_benchmark_level = {"value": None}
 
 # book_id -> latest computed metrics dict, served by the API.
@@ -55,41 +59,44 @@ def variance(values, mean_value):
 
 
 def snapshot_book_values():
-    """Aggregate the latest per-trade valuations into a market value per book.
+    """Aggregate the latest per-trade valuations into one value per book.
 
-    A book's value is the sum of the latest ``fair_value`` of every trade that
-    belongs to it (fair_value already embeds quantity and multiplier), i.e. the
-    current mark-to-market value of the whole book.
+    Values are summed per currency. The returned pair is the currency whose
+    absolute fair value is largest, so two currencies are not added together.
     """
     import calculation_service
 
-    book_values = defaultdict(float)
-    with calculation_service.pricing_lock:
-        valuations = list(calculation_service.valuations_store.values())
+    totals = defaultdict(lambda: defaultdict(float))
+    valuations = calculation_service.valuation_state.mark_snapshot()
 
     for valuation in valuations:
         book_id = valuation.get("book_id")
         fair_value = valuation.get("fair_value")
         if book_id is None or fair_value is None:
             continue
-        book_values[book_id] += float(fair_value)
+        currency = valuation.get("currency") or ""
+        totals[book_id][currency] += float(fair_value)
 
-    return book_values
+    chosen = {}
+    for book_id, by_currency in totals.items():
+        currency, value = max(by_currency.items(), key=lambda item: (abs(item[1]), item[0]))
+        chosen[book_id] = (currency, value)
+    return chosen
 
 
-def compute_metrics(book_id, pairs):
-    book_returns = [p[0] for p in pairs]
-    benchmark_returns = [p[1] for p in pairs]
+def compute_metrics(book_id, pairs, currency):
+    series = [pair[0] for pair in pairs]
+    benchmark_series = [pair[1] for pair in pairs]
 
-    mean_book = mean(book_returns)
-    mean_benchmark = mean(benchmark_returns)
-    var_benchmark = variance(benchmark_returns, mean_benchmark)
+    mean_book = mean(series)
+    mean_benchmark = mean(benchmark_series)
+    var_benchmark = variance(benchmark_series, mean_benchmark)
 
     if var_benchmark == 0:
         beta = None
         alpha = None
     else:
-        cov = covariance(book_returns, benchmark_returns, mean_book, mean_benchmark)
+        cov = covariance(series, benchmark_series, mean_book, mean_benchmark)
         beta = cov / var_benchmark
         alpha = mean_book - beta * mean_benchmark
 
@@ -102,6 +109,7 @@ def compute_metrics(book_id, pairs):
         "avg_book_return": round(mean_book, 8),
         "avg_benchmark_return": round(mean_benchmark, 8),
         "benchmark_symbol": "MARKET_INDEX",
+        "currency": currency,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -127,32 +135,37 @@ def seed_initial_levels(book_values):
 
     Must be called while holding ``book_metrics_cache_lock``.
     """
-    for book_id, book_value in book_values.items():
-        last_book_value[book_id] = book_value
-    logging.info("Seeded benchmark/book levels for alpha/beta (first observation).")
+    for book_id, (currency, book_value) in book_values.items():
+        last_book_value[book_id] = (currency, book_value)
+    logging.debug("Seeded benchmark/book levels for alpha/beta (first observation).")
 
 
-def update_book_metrics(book_id, book_value, benchmark_return):
+def update_book_metrics(book_id, currency, book_value, benchmark_return):
     """Append a new aligned return pair for a book and refresh its alpha/beta.
 
     Must be called while holding ``book_metrics_cache_lock``.
+    A currency change clears the window so returns are not mixed.
     """
-    prev_book_value = last_book_value.get(book_id)
-    last_book_value[book_id] = book_value
+    previous = last_book_value.get(book_id)
+    last_book_value[book_id] = (currency, book_value)
 
-    book_return = simple_return(book_value, prev_book_value)
+    if previous is None or previous[0] != currency:
+        book_returns[book_id].clear()
+        return
+
+    book_return = simple_return(book_value, previous[1])
     if book_return is None:
         return
 
     book_returns[book_id].append((book_return, benchmark_return))
 
-    book_pairs = book_returns[book_id]
-    if len(book_pairs) < MIN_OBSERVATIONS:
+    pairs = book_returns[book_id]
+    if len(pairs) < MIN_OBSERVATIONS:
         return
 
-    metrics = compute_metrics(book_id, list(book_pairs))
+    metrics = compute_metrics(book_id, list(pairs), currency)
     metrics_store[book_id] = metrics
-    logging.info(
+    logging.debug(
         f"Book {book_id} metrics updated: alpha={metrics['alpha']}, "
         f"beta={metrics['beta']}, observations={metrics['observations']}"
     )
@@ -177,8 +190,22 @@ def on_benchmark_tick(tick):
 
         benchmark_return = simple_return(index_level, prev_level)
 
-        for book_id, book_value in book_values.items():
-            update_book_metrics(book_id, book_value, benchmark_return)
+        for book_id, (currency, book_value) in book_values.items():
+            update_book_metrics(book_id, currency, book_value, benchmark_return)
+
+
+def prune_books(book_ids):
+    """Drop metric state for books that no longer have a valuation."""
+    with book_metrics_cache_lock:
+        for book_id in list(metrics_store):
+            if book_id not in book_ids:
+                metrics_store.pop(book_id, None)
+        for book_id in list(last_book_value):
+            if book_id not in book_ids:
+                last_book_value.pop(book_id, None)
+        for book_id in list(book_returns):
+            if book_id not in book_ids:
+                book_returns.pop(book_id, None)
 
 
 def get_all_metrics():
@@ -190,3 +217,17 @@ def get_metrics_for_book(book_id):
     with book_metrics_cache_lock:
         metrics = metrics_store.get(book_id)
         return dict(metrics) if metrics is not None else None
+
+
+def require_metrics(book_id):
+    from fastapi import status
+
+    from api.errors import ApiError
+
+    metrics = get_metrics_for_book(book_id)
+    if metrics is None:
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND,
+            "No metrics available for book_id: " + book_id,
+        )
+    return metrics

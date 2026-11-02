@@ -23,18 +23,32 @@ def _parse_market_data_timestamp(value):
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+def _parse_valuation_time(value):
+    """Use the mark time from the payload. Fall back to now only when it is missing."""
+    parsed = _parse_market_data_timestamp(value)
+    if parsed is None:
+        return datetime.now(timezone.utc)
+    return parsed
+
+
+def _as_uuid(value):
+    if isinstance(value, uuid.UUID):
+        return value
+    return uuid.UUID(str(value))
+
+
 def to_valuation(valuation_data):
-    valuation_time = datetime.now(timezone.utc)
+    valuation_time = _parse_valuation_time(valuation_data.get("valuation_time"))
     return Valuation(
         valuation_id=uuid.uuid4(),
-        trade_id=valuation_data["trade_id"],
-        book_id=valuation_data["book_id"],
+        trade_id=_as_uuid(valuation_data["trade_id"]),
+        book_id=_as_uuid(valuation_data["book_id"]),
         asset_class=valuation_data["asset_class"],
         valuation_time=valuation_time,
         fair_value=valuation_data["fair_value"],
         market_value=valuation_data.get("market_value"),
         market_data_reference=(
-            f"{valuation_data['asset_class']}:{valuation_data['symbol']}@{valuation_time}"
+            f"{valuation_data['asset_class']}:{valuation_data['symbol']}@{valuation_time.isoformat()}"
         ),
         unrealized_pnl=valuation_data["unrealized_pnl"],
         realized_pnl=valuation_data["realized_pnl"],
