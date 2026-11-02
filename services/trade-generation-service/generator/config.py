@@ -186,12 +186,12 @@ def _config_from_env():
 generator_config = _config_from_env()
 
 
-def get_config():
-    return dict(generator_config)
+def validated_config(payload):
+    """Return the next config. Does not publish it.
 
-
-def update_config(payload):
-    """Apply a partial config update. Returns the new config or raises ValueError."""
+    One event loop and `publish_config` has no await, so the copy cannot land
+    between `clear` and `update`.
+    """
     if not isinstance(payload, dict) or not payload:
         raise ValueError("Request body must be a non-empty JSON object")
 
@@ -199,6 +199,14 @@ def update_config(payload):
     if unknown:
         raise ValueError(f"Unknown config keys: {', '.join(sorted(unknown))}")
 
-    next_config = _apply_config_patch(generator_config, payload)
-    generator_config.update(next_config)
-    return get_config()
+    return _apply_config_patch(dict(generator_config), payload)
+
+
+def get_config():
+    return dict(generator_config)
+
+
+def publish_config(nxt):
+    """Replace the live config. Caller must already have decided the remote flag."""
+    generator_config.clear()
+    generator_config.update(nxt)
