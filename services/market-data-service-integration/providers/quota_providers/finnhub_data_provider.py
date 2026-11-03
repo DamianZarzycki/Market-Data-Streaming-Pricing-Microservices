@@ -1,14 +1,12 @@
-import asyncio
 import logging
-import json
 import os
-from urllib import request as urllib_request
 from datetime import datetime, timezone
+
 from providers.quota_providers._base import BaseProvider, ProviderAPIError
 
 api_key: str = os.getenv("FINNHUB_API_KEY") or ""
 
-    
+
 class FinnhubProvider(BaseProvider):
     key = "finnhub"
     semaphore_limit = 1
@@ -16,9 +14,6 @@ class FinnhubProvider(BaseProvider):
     def __init__(self):
         super().__init__(api_key)
         self.url = "https://finnhub.io/api/v1/quote?symbol={symbol}&token={api_key}"
-
-    def request_headers(self) -> dict:
-        return {"X-Finnhub-Token": self.api_key}
 
     def provider_error(self, data) -> ProviderAPIError | None:
         if not isinstance(data, dict):
@@ -32,11 +27,8 @@ class FinnhubProvider(BaseProvider):
         pass
 
     def get_headers(self):
-        logging.info("Getting headers for FinnhubProvider: %s", self.api_key)
-        return {
-            "X-Finnhub-Token": self.api_key
-        }
-    
+        return {"X-Finnhub-Token": self.api_key}
+
     def normalize_data(self, data, symbol) -> dict:
         timestamp = data.get("t")
         provider_timestamp = None
@@ -58,10 +50,9 @@ class FinnhubProvider(BaseProvider):
             "raw_payload": data,
         }
 
-
-    def fetch_data(self, symbol: str):
-        req = urllib_request.Request(self.url.format(symbol=symbol, api_key=self.api_key), headers=self.get_headers())
-
-        with urllib_request.urlopen(req) as response:
-            return json.loads(response.read().decode())
-
+    # Async: awaits AsyncClient.get.
+    async def fetch_data(self, symbol: str):
+        return await self.get_json(
+            self.url.format(symbol=symbol, api_key=self.api_key),
+            headers=self.get_headers(),
+        )

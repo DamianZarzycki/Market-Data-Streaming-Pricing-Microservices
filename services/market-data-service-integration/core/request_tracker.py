@@ -2,7 +2,7 @@ import logging
 import threading
 from datetime import datetime, timedelta, timezone
 
-from shared.trading_shared.db import DBSessionManager
+from shared.trading_shared.db import AsyncDBSessionManager
 from shared.trading_shared.models import MarketDataProviderRequest
 
 
@@ -31,13 +31,14 @@ class RequestTracker:
             "monthly": (now.replace(day=28) + timedelta(days=4)).replace(day=1, hour=0, minute=0, second=0, microsecond=0),
         }
 
+    # Async: awaits provider_requests.list_since_async.
     @classmethod
-    def from_db(cls, limits: dict[str, dict[str, int | None]]) -> "RequestTracker":
+    async def from_db(cls, limits: dict[str, dict[str, int | None]]) -> "RequestTracker":
         tracker = cls(limits)
         now = _utc_now()
         start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        with DBSessionManager() as db:
-            rows = db.provider_requests.list_since(start_of_month)
+        async with AsyncDBSessionManager() as db:
+            rows = await db.provider_requests.list_since_async(start_of_month)
         for row in rows:
             if row.provider not in tracker._counts:
                 continue
@@ -52,7 +53,7 @@ class RequestTracker:
         return tracker
 
     def can_request(self, provider: str) -> tuple[bool, str | None]:
-        """Check quota. Returns (allowed, block_reason)."""
+        """Check quota. The counters live in memory, so this stays synchronous."""
         with self._lock:
             return self._can_request_locked(provider)
 
@@ -85,8 +86,9 @@ class RequestTracker:
                 return False, f"{window}_limit"
         return True, None
 
-    def record(self, provider: str, symbol: str | None = None) -> None:
-        """Count the request and persist it to DB."""
+    # Async: awaits AsyncSession.commit for the provider_requests insert.
+    # The in-memory counters are updated first, and the lock is not held across the insert.
+    async def record(self, provider: str, symbol: str | None = None) -> None:
         now = _utc_now()
         with self._lock:
             if provider not in self._counts:
@@ -95,11 +97,11 @@ class RequestTracker:
             for window in self._counts[provider]:
                 self._counts[provider][window] += 1
         try:
-            with DBSessionManager() as db:
+            async with AsyncDBSessionManager() as db:
                 db.provider_requests.add(
                     MarketDataProviderRequest(provider=provider, symbol=symbol, requested_at=now)
                 )
-                db.commit()
+                await db.commit()
         except Exception as exc:
             logging.error("Failed to persist provider request %s: %s", provider, exc)
 

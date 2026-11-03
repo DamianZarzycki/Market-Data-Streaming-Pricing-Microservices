@@ -29,6 +29,8 @@ _COLLIDING = (
     "state",
     "routes",
     "api",
+    "core",
+    "providers",
     "metrics",
     "actions",
     "processing",

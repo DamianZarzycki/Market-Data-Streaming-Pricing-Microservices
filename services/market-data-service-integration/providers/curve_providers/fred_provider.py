@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 
@@ -26,16 +27,24 @@ class FredProvider(CurveProviderBase):
         super().__init__(self.key)
         self.api_key = os.getenv("FRED_API_KEY") or ""
 
-    def fetch_data(self):
+    # Async: awaits AsyncClient.get for this series.
+    async def _observation(self, series_id: str, tenor: str):
+        payload = await self.get_json(
+            self.url.format(series_id=series_id, api_key=self.api_key)
+        )
+        return tenor, payload
+
+    # Async: awaits asyncio.gather of the series requests.
+    async def fetch_data(self):
         if not self.api_key:
             return {"error": "FRED_API_KEY is not set"}
 
         logging.info("Fetching FRED US Treasury yield curve")
+        fetched = await asyncio.gather(
+            *[self._observation(series_id, tenor) for series_id, tenor in FRED_SERIES]
+        )
         observations = {}
-        for series_id, tenor in FRED_SERIES:
-            payload = self.get_json(
-                self.url.format(series_id=series_id, api_key=self.api_key)
-            )
+        for tenor, payload in fetched:
             if payload.get("error_code") or payload.get("error_message"):
                 return payload
             rows = payload.get("observations") or []

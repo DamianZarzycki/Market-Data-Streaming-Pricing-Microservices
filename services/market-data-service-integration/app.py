@@ -1,159 +1,137 @@
+import asyncio
 import logging
-import threading
+from contextlib import asynccontextmanager
 
-import core.audit_worker as audit_worker
-import core.worker as worker
-from bottle import Bottle
+import uvicorn
+from fastapi import FastAPI
 
-from custom_server import ThreadedServer
+from api.errors import install_error_handlers
+from core import http as http_client
+from core import state
+from core.audit_worker import audit_worker
 from core.curve_service import CurveService
-from core.fetch_audit import snapshot
-from core.poll_workers import PollWorkers
+from core.polling.orchestrator import PollWorkers
 from core.quote_service import QuoteService
 from core.request_tracker import RequestTracker
+from core.worker import db_queue, db_worker
 from providers.limits.market_data_providers_limits import load_providers_limits
 from routes import register_routes
 from shared.trading_shared.audit import AuditLogger
+from shared.trading_shared.db import dispose_async_engine
 from shared.trading_shared.enums import EventType
+from shared.trading_shared.logging_config import configure_logging
 
-app = Bottle()
+configure_logging("market-data-service-integration")
+
 audit_logger = AuditLogger("market-data-service-integration")
-_quote_service: QuoteService | None = None
-_curve_service: CurveService | None = None
-_poll_workers: PollWorkers | None = None
 
 
-def quote_service() -> QuoteService:
-    if _quote_service is None:
-        raise RuntimeError("QuoteService not initialized")
-    return _quote_service
+# Async: awaits the quote poll loop, which awaits provider fetches and asyncio.sleep.
+async def quote_poll_worker() -> None:
+    await state.get_poll_workers().quote_loop()
 
 
-def curve_service() -> CurveService:
-    if _curve_service is None:
-        raise RuntimeError("CurveService not initialized")
-    return _curve_service
+# Async: awaits the curve poll loop, which awaits provider fetches and asyncio.sleep.
+async def curve_poll_worker() -> None:
+    await state.get_poll_workers().curve_loop()
 
 
-def poll_workers() -> PollWorkers:
-    if _poll_workers is None:
-        raise RuntimeError("Poll workers not initialized")
-    return _poll_workers
+# Async: awaits the curve persistence queue, then AsyncSession.commit.
+async def curve_db_worker() -> None:
+    await state.get_poll_workers().persist_loop()
 
 
-register_routes(app, quote_service, curve_service, snapshot, poll_workers)
-
-# GET /health
-# GET /providers
-# GET /providers/health
-# GET /providers/<provider>/health
-# GET /market-data/symbols
-# GET /market-data/snapshot
-# GET /market-data/quotes?symbol=AAPL&asset_class=EQUITY
-# GET /market-data/fx-quotes?symbol=EURUSD
-# GET /market-data/curve-quotes?symbol=USD_10Y&asset_class=BOND
-# GET /market-data/quotes/<provider>/<symbol>
-# GET /market-data/stream
-# GET /market-data/stream/<provider>
-# GET /curves — latest persisted curve per (provider, currency, curve_type)
-# GET /curves/<provider> — latest persisted curve for that provider
-# GET|POST /market-data/refresh
-# GET|POST /curves/refresh — live fetch + persist
-
-if __name__ == "__main__":
-    audit_logger.info(
-        EventType.WORKER_STARTED,
-        "Market Data Service Integration started",
-        entity_type="Service",
-        correlation_id="",
+def _worker_table():
+    return (
+        ("quote-db-worker", db_worker, "Database Worker started", "Database Worker stopped"),
+        ("fetch-audit-worker", audit_worker, "Fetch audit worker started", "Fetch audit worker stopped"),
+        ("quota-poll-worker", quote_poll_worker, "Quota poll worker started", "Quota poll worker stopped"),
+        ("curve-poll-worker", curve_poll_worker, "Curve poll worker started", "Curve poll worker stopped"),
+        (
+            "curve-db-worker",
+            curve_db_worker,
+            "Curve persistence worker started",
+            "Curve persistence worker stopped",
+        ),
     )
-    audit_logger.info(
-        EventType.WORKER_STARTED,
-        "Database Worker started",
-        entity_type="Service",
-        correlation_id="",
-    )
-    db_thread = threading.Thread(target=worker.db_worker)
-    db_thread.daemon = True
-    db_thread.start()
 
-    audit_logger.info(
-        EventType.WORKER_STARTED,
-        "Fetch audit worker started",
-        entity_type="Service",
-        correlation_id="",
-    )
-    audit_thread = threading.Thread(target=audit_worker.audit_worker)
-    audit_thread.daemon = True
-    audit_thread.start()
 
-    tracker = RequestTracker.from_db(load_providers_limits())
-    if not tracker.limits:
+# Async: awaits provider-limit load and request-tracker hydration.
+async def startup() -> None:
+    http_client.open_http()
+    limits = await load_providers_limits()
+    if not limits:
         logging.warning(
             "No provider limits found in DB; fetches will be denied as unknown_provider"
         )
     else:
-        logging.info("Loaded provider limits from DB: %s", tracker.limits)
+        logging.info("Loaded provider limits from DB: %s", limits)
+    tracker = await RequestTracker.from_db(limits)
+    state.quote_service = QuoteService.create(tracker, db_queue)
+    state.curve_service = CurveService.create()
+    state.poll_workers = PollWorkers(state.quote_service, state.curve_service)
 
-    _quote_service = QuoteService.create(tracker, worker.db_queue)
-    _curve_service = CurveService.create()
-    _poll_workers = PollWorkers(_quote_service, _curve_service)
-    _poll_workers.start()
 
-    audit_logger.info(
-        EventType.WORKER_STARTED,
-        "Quota poll worker started",
-        entity_type="Service",
-        correlation_id="",
-    )
-    audit_logger.info(
-        EventType.WORKER_STARTED,
-        "Curve poll worker started",
-        entity_type="Service",
-        correlation_id="",
-    )
-
+# Async: awaits startup, audit inserts, worker cancellation, AsyncClient.aclose, and engine dispose.
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    tasks = []
+    workers = ()
     try:
-        app.run(host="0.0.0.0", port=8005, server=ThreadedServer)
+        await audit_logger.ainfo(
+            EventType.WORKER_STARTED,
+            "Market Data Service Integration started",
+            entity_type="Service",
+            correlation_id="",
+        )
+        await startup()
+        workers = _worker_table()
+        for name, worker, started, _stopped in workers:
+            await audit_logger.ainfo(
+                EventType.WORKER_STARTED,
+                started,
+                entity_type="Service",
+                correlation_id="",
+            )
+            tasks.append(asyncio.create_task(worker(), name=name))
+        yield
     finally:
-        if _poll_workers is not None:
-            _poll_workers.stop()
-            _poll_workers.join(timeout=_poll_workers.interval_seconds + 2)
-            audit_logger.info(
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        for _name, _worker, _started, stopped in reversed(workers):
+            await audit_logger.ainfo(
                 EventType.WORKER_STOPPED,
-                "Quota poll worker stopped",
+                stopped,
                 entity_type="Service",
                 correlation_id="",
             )
-            audit_logger.info(
+        if workers:
+            await audit_logger.ainfo(
                 EventType.WORKER_STOPPED,
-                "Curve poll worker stopped",
+                "Poll workers stopped",
                 entity_type="Service",
                 correlation_id="",
             )
-        audit_worker.stop()
-        audit_thread.join(timeout=audit_worker.FLUSH_INTERVAL_SECONDS + 2)
-        audit_logger.info(
-            EventType.WORKER_STOPPED,
-            "Fetch audit worker stopped",
-            entity_type="Service",
-            correlation_id="",
-        )
-        audit_logger.info(
-            EventType.WORKER_STOPPED,
-            "Market Data Service Integration stopped",
-            entity_type="Service",
-            correlation_id="",
-        )
-        audit_logger.info(
-            EventType.WORKER_STOPPED,
-            "Database Worker stopped",
-            entity_type="Service",
-            correlation_id="",
-        )
-        audit_logger.info(
-            EventType.WORKER_STOPPED,
-            "Poll workers stopped",
-            entity_type="Service",
-            correlation_id="",
-        )
+            await audit_logger.ainfo(
+                EventType.WORKER_STOPPED,
+                "Market Data Service Integration stopped",
+                entity_type="Service",
+                correlation_id="",
+            )
+        await http_client.close_http()
+        await dispose_async_engine()
+
+
+app = FastAPI(lifespan=lifespan)
+install_error_handlers(app)
+register_routes(app)
+
+
+if __name__ == "__main__":
+    logging.info("Starting Market Data Service Integration...")
+    uvicorn.run("app:app", host="0.0.0.0", port=8005, workers=1)

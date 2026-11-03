@@ -6,6 +6,17 @@ x-depends-on-db: &depends-on-db
   db-seed:
     condition: service_completed_successfully
 
+# Compose DNS names. Override them in .env; the Python helper requires the
+# variables and does not keep a second copy of the host.
+x-service-urls: &service-urls
+  MARKET_DATA_SERVICE_URL: ${MARKET_DATA_SERVICE_URL:-http://market-data-service:8001}
+  MARKET_DATA_INTEGRATION_URL: ${MARKET_DATA_INTEGRATION_URL:-http://market-data-service-integration:8005}
+  PRICING_SERVICE_URL: ${PRICING_SERVICE_URL:-http://pricing-service:8002}
+  BOOKS_SERVICE_URL: ${BOOKS_SERVICE_URL:-http://books-service:8004}
+  TRADE_ACTION_SERVICE_URL: ${TRADE_ACTION_SERVICE_URL:-http://trade-action-service:8080}
+  TRADE_GENERATION_SERVICE_URL: ${TRADE_GENERATION_SERVICE_URL:-http://trade-generation-service:8007}
+  BLOTTER_SERVICE_URL: ${BLOTTER_SERVICE_URL:-http://blotter-service:8006}
+
 services:
   postgres:
       image: postgres:15
@@ -50,8 +61,9 @@ services:
     volumes:
       - ./shared:/app/shared
     environment:
-      - TICK_INTERVAL_MS=500
-      - DATABASE_URL=${DATABASE_URL}
+      <<: *service-urls
+      TICK_INTERVAL_MS: "500"
+      DATABASE_URL: ${DATABASE_URL}
     depends_on: *depends-on-db
   pricing-service:
     build: ./services/pricing-service
@@ -60,7 +72,8 @@ services:
     volumes:
       - ./shared:/app/shared
     environment:
-      - DATABASE_URL=${DATABASE_URL}
+      <<: *service-urls
+      DATABASE_URL: ${DATABASE_URL}
     depends_on: *depends-on-db
   monitoring-service:
     build: ./services/monitoring-service
@@ -69,7 +82,8 @@ services:
     volumes:
       - ./shared:/app/shared
     environment:
-      - DATABASE_URL=${DATABASE_URL}
+      <<: *service-urls
+      DATABASE_URL: ${DATABASE_URL}
     depends_on: *depends-on-db
   books-service:
     build: ./services/books-service
@@ -78,7 +92,8 @@ services:
     volumes:
       - ./shared:/app/shared
     environment:
-      - DATABASE_URL=${DATABASE_URL}
+      <<: *service-urls
+      DATABASE_URL: ${DATABASE_URL}
     depends_on: *depends-on-db
   blotter-service:
     build: ./services/blotter-service
@@ -87,7 +102,8 @@ services:
     volumes:
       - ./shared:/app/shared
     environment:
-      - DATABASE_URL=${DATABASE_URL}
+      <<: *service-urls
+      DATABASE_URL: ${DATABASE_URL}
     depends_on: *depends-on-db
   trade-generation-service:
     build: ./services/trade-generation-service
@@ -96,16 +112,17 @@ services:
     volumes:
       - ./shared:/app/shared
     environment:
-      - DATABASE_URL=${DATABASE_URL}
-      - TRADE_GENERATION_INTERVAL_MS=${TRADE_GENERATION_INTERVAL_MS:-4000}
-      - TRADE_GENERATION_BATCH_SIZE=${TRADE_GENERATION_BATCH_SIZE:-10}
-      - TRADE_GENERATION_OPEN_WEIGHT_PCT=${TRADE_GENERATION_OPEN_WEIGHT_PCT:-70}
-      - TRADE_GENERATION_CLOSE_WEIGHT_PCT=${TRADE_GENERATION_CLOSE_WEIGHT_PCT:-30}
-      - TRADE_GENERATION_QTY_MIN=${TRADE_GENERATION_QTY_MIN:-10}
-      - TRADE_GENERATION_QTY_MAX=${TRADE_GENERATION_QTY_MAX:-1000}
-      - TRADE_GENERATION_PRICE_MIN=${TRADE_GENERATION_PRICE_MIN:-50}
-      - TRADE_GENERATION_PRICE_MAX=${TRADE_GENERATION_PRICE_MAX:-150}
-      - USE_PROVIDER_DATA=${USE_PROVIDER_DATA:-false}
+      <<: *service-urls
+      DATABASE_URL: ${DATABASE_URL}
+      TRADE_GENERATION_INTERVAL_MS: ${TRADE_GENERATION_INTERVAL_MS:-4000}
+      TRADE_GENERATION_BATCH_SIZE: ${TRADE_GENERATION_BATCH_SIZE:-10}
+      TRADE_GENERATION_OPEN_WEIGHT_PCT: ${TRADE_GENERATION_OPEN_WEIGHT_PCT:-70}
+      TRADE_GENERATION_CLOSE_WEIGHT_PCT: ${TRADE_GENERATION_CLOSE_WEIGHT_PCT:-30}
+      TRADE_GENERATION_QTY_MIN: ${TRADE_GENERATION_QTY_MIN:-10}
+      TRADE_GENERATION_QTY_MAX: ${TRADE_GENERATION_QTY_MAX:-1000}
+      TRADE_GENERATION_PRICE_MIN: ${TRADE_GENERATION_PRICE_MIN:-50}
+      TRADE_GENERATION_PRICE_MAX: ${TRADE_GENERATION_PRICE_MAX:-150}
+      USE_PROVIDER_DATA: ${USE_PROVIDER_DATA:-false}
     depends_on: *depends-on-db
   market-data-service-integration:
     build: ./services/market-data-service-integration
@@ -114,21 +131,22 @@ services:
     volumes:
       - ./shared:/app/shared
     environment:
-      - DATABASE_URL=${DATABASE_URL}
-      - FINNHUB_API_KEY=${FINNHUB_API_KEY}
-      - TWELVEDATA_API_KEY=${TWELVEDATA_API_KEY}
-      - ALPHAVANTAGE_API_KEY=${ALPHAVANTAGE_API_KEY}
-      - FRED_API_KEY=${FRED_API_KEY}
-      - MARKET_DATA_POLL_INTERVAL_SECONDS=${MARKET_DATA_POLL_INTERVAL_SECONDS:-30}
-      - CURVE_DATA_REFRESH_INTERVAL_SECONDS=${CURVE_DATA_REFRESH_INTERVAL_SECONDS:-3600}
-      - MARKET_DATA_SYMBOLS=${MARKET_DATA_SYMBOLS:-AAPL,MSFT,TSLA,GOOGL,AMZN,NVDA,SPY,QQQ,EURUSD,GBPUSD,USDJPY}
-      - MARKET_DATA_FX_SYMBOLS=${MARKET_DATA_FX_SYMBOLS:-EURUSD,GBPUSD,USDJPY}
-      - MARKET_DATA_BOND_SYMBOLS=${MARKET_DATA_BOND_SYMBOLS:-USD_5Y,USD_10Y,EUR_10Y}
-      - MARKET_DATA_IRS_SYMBOLS=${MARKET_DATA_IRS_SYMBOLS:-USD_5Y_IRS,USD_10Y_IRS,EUR_10Y_IRS}
-      - MARKET_DATA_FUTURES_CONTRACTS=${MARKET_DATA_FUTURES_CONTRACTS:-ES:SPY:50,MES:SPY:5,NQ:QQQ:20}
-      - PROVIDER_FETCH_TIMEOUT_SECONDS=${PROVIDER_FETCH_TIMEOUT_SECONDS:-1.0}
-      - MARKET_DATA_MOCK_STREAM=${MARKET_DATA_MOCK_STREAM:-false}
-      - MARKET_DATA_MOCK_INTERVAL_SECONDS=${MARKET_DATA_MOCK_INTERVAL_SECONDS:-2}
+      <<: *service-urls
+      DATABASE_URL: ${DATABASE_URL}
+      FINNHUB_API_KEY: ${FINNHUB_API_KEY}
+      TWELVEDATA_API_KEY: ${TWELVEDATA_API_KEY}
+      ALPHAVANTAGE_API_KEY: ${ALPHAVANTAGE_API_KEY}
+      FRED_API_KEY: ${FRED_API_KEY}
+      MARKET_DATA_POLL_INTERVAL_SECONDS: ${MARKET_DATA_POLL_INTERVAL_SECONDS:-30}
+      CURVE_DATA_REFRESH_INTERVAL_SECONDS: ${CURVE_DATA_REFRESH_INTERVAL_SECONDS:-3600}
+      MARKET_DATA_SYMBOLS: ${MARKET_DATA_SYMBOLS:-AAPL,MSFT,TSLA,GOOGL,AMZN,NVDA,SPY,QQQ,EURUSD,GBPUSD,USDJPY}
+      MARKET_DATA_FX_SYMBOLS: ${MARKET_DATA_FX_SYMBOLS:-EURUSD,GBPUSD,USDJPY}
+      MARKET_DATA_BOND_SYMBOLS: ${MARKET_DATA_BOND_SYMBOLS:-USD_5Y,USD_10Y,EUR_10Y}
+      MARKET_DATA_IRS_SYMBOLS: ${MARKET_DATA_IRS_SYMBOLS:-USD_5Y_IRS,USD_10Y_IRS,EUR_10Y_IRS}
+      MARKET_DATA_FUTURES_CONTRACTS: ${MARKET_DATA_FUTURES_CONTRACTS:-ES:SPY:50,MES:SPY:5,NQ:QQQ:20}
+      PROVIDER_FETCH_TIMEOUT_SECONDS: ${PROVIDER_FETCH_TIMEOUT_SECONDS:-1.0}
+      MARKET_DATA_MOCK_STREAM: ${MARKET_DATA_MOCK_STREAM:-false}
+      MARKET_DATA_MOCK_INTERVAL_SECONDS: ${MARKET_DATA_MOCK_INTERVAL_SECONDS:-2}
     depends_on: *depends-on-db
   trade-action-service:
     build: ./services/trade-action-service
@@ -137,9 +155,9 @@ services:
     volumes:
       - ./shared:/app/shared
     environment:
-      - DATABASE_URL=${DATABASE_URL}
-      - TRADE_ACTION_QUEUE_MAXSIZE=${TRADE_ACTION_QUEUE_MAXSIZE:-100}
-      - TRADE_VALUATION_QUEUE_MAXSIZE=${TRADE_VALUATION_QUEUE_MAXSIZE:-100}
-      - USE_PROVIDER_DATA=${USE_PROVIDER_DATA:-false}
+      <<: *service-urls
+      DATABASE_URL: ${DATABASE_URL}
+      TRADE_ACTION_QUEUE_MAXSIZE: ${TRADE_ACTION_QUEUE_MAXSIZE:-100}
+      TRADE_VALUATION_QUEUE_MAXSIZE: ${TRADE_VALUATION_QUEUE_MAXSIZE:-100}
+      USE_PROVIDER_DATA: ${USE_PROVIDER_DATA:-false}
     depends_on: *depends-on-db
-    

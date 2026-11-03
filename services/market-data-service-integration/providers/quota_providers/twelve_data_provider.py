@@ -1,9 +1,8 @@
-import os
-import json
-import urllib.request
-from datetime import datetime, timezone
-from providers.quota_providers._base import BaseProvider, ProviderAPIError
 import logging
+import os
+from datetime import datetime, timezone
+
+from providers.quota_providers._base import BaseProvider, ProviderAPIError
 
 api_key: str = os.getenv("TWELVEDATA_API_KEY") or ""
 
@@ -29,14 +28,9 @@ class TwelveDataProvider(BaseProvider):
             return ProviderAPIError("missing close price")
         return None
 
-
     def health(self) -> ProviderAPIError | None:
-        # easiest/cheapest api call to check if the provider is healthy
-        req = urllib.request.Request(self.url.format(symbol="AAPL", api_key=self.api_key))
-        with urllib.request.urlopen(req) as response:
-            if response.status != 200:
-                return ProviderAPIError("failed to check health")
-            return None 
+        # Live probes go through fetch_data on GET /providers/health.
+        return None
 
     def normalize_data(self, data, symbol) -> dict:
         timestamp = data.get("last_quote_at") or data.get("timestamp")
@@ -59,9 +53,7 @@ class TwelveDataProvider(BaseProvider):
             "raw_payload": data,
         }
 
-    def fetch_data(self, symbol: str):
+    # Async: awaits AsyncClient.get.
+    async def fetch_data(self, symbol: str):
         logging.info("Fetching data from TwelveData for symbol: %s", symbol)
-        req = urllib.request.Request(self.url.format(symbol=symbol, api_key=self.api_key))
-        with urllib.request.urlopen(req) as response:
-            return json.loads(response.read().decode())
-
+        return await self.get_json(self.url.format(symbol=symbol, api_key=self.api_key))

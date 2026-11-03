@@ -20,9 +20,10 @@ class EcbProvider(CurveProviderBase):
     def __init__(self):
         super().__init__(self.key)
 
-    def fetch_data(self):
+    # Async: awaits AsyncClient.get.
+    async def fetch_data(self):
         logging.info("Fetching ECB AAA euro yield curve")
-        text = self.get_text(self.url, headers={"Accept": "text/csv"})
+        text = await self.get_text(self.url, headers={"Accept": "text/csv"})
         return list(csv.DictReader(io.StringIO(text)))
 
     def provider_error(self, data) -> str | None:

@@ -1,14 +1,14 @@
+import asyncio
 import logging
-import queue
 from datetime import datetime, timezone
 from decimal import Decimal
 
 from shared.trading_shared.audit import AuditLogger
-from shared.trading_shared.db import DBSessionManager
+from shared.trading_shared.db import AsyncDBSessionManager
 from shared.trading_shared.enums import EntityType, EventType
 from shared.trading_shared.models import MarketDataProviderQuote, MarketDataSnapshot
 
-db_queue = queue.Queue()
+db_queue: asyncio.Queue = asyncio.Queue()
 audit_logger = AuditLogger("market-data-service-integration")
 
 
@@ -18,10 +18,11 @@ def _parse_timestamp(value):
     return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
 
-def db_worker():
+# Async task: awaits db_queue.get, then AsyncSession.commit.
+async def db_worker():
     logging.info("Provider quote DB worker started")
     while True:
-        quote = db_queue.get()
+        quote = await db_queue.get()
         provider_name = quote.get("provider")
         symbol = quote.get("symbol")
         try:
@@ -47,20 +48,22 @@ def db_worker():
                 },
                 payload=quote.get("raw_payload") or {},
             )
-            with DBSessionManager() as db:
+            async with AsyncDBSessionManager() as db:
                 db.provider_quotes.add(record)
                 db.market_data_snapshots.add(snapshot)
-                db.commit()
+                await db.commit()
             logging.info("Stored %s quote for %s last=%s", provider_name, symbol, quote.get("last"))
-            audit_logger.info(
+            await audit_logger.ainfo(
                 EventType.DB_CREATE,
                 f"Stored {provider_name} quote for {symbol}",
                 entity_type=EntityType.MARKET_DATA.value,
                 payload={"provider": provider_name, "symbol": symbol, "last": quote.get("last")},
             )
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logging.error("Failed to persist provider quote for %s %s: %s", provider_name, symbol, e)
-            audit_logger.error(
+            await audit_logger.aerror(
                 EventType.DB_ERROR,
                 f"Failed to persist {provider_name} quote for {symbol}: {e}",
                 entity_type=EntityType.MARKET_DATA.value,

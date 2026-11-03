@@ -220,3 +220,16 @@ def parse_curve_as_of_time(as_of_time_value: object) -> datetime | None:
             as_of_time_value,
         )
         return None
+
+
+def symbol_catalog() -> dict:
+    """Symbol lists for GET /market-data/symbols. Reads environment variables only."""
+    symbols = read_symbol_map()
+    contracts = {
+        contract.symbol: {
+            "underlying": contract.underlying,
+            "multiplier": contract.multiplier,
+        }
+        for contract in read_futures_contracts()
+    }
+    return {**symbols, "FUTURES_CONTRACTS": contracts}

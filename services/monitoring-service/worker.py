@@ -6,17 +6,18 @@ import time
 import httpx2
 
 from shared.trading_shared.enums import ServiceStatus
+from shared.trading_shared.env import env
 
 from state import _iso_now, state
 
 PROBE_TARGETS = (
-    ("market-data-service", "http://market-data-service:8001/health"),
-    ("pricing-service", "http://pricing-service:8002/health"),
-    ("trade-generation-service", "http://trade-generation-service:8007/health"),
-    ("trade-action-service", "http://trade-action-service:8080/health"),
+    ("market-data-service", f"{env('MARKET_DATA_SERVICE_URL').rstrip('/')}/health"),
+    ("pricing-service", f"{env('PRICING_SERVICE_URL').rstrip('/')}/health"),
+    ("trade-generation-service", f"{env('TRADE_GENERATION_SERVICE_URL').rstrip('/')}/health"),
+    ("trade-action-service", f"{env('TRADE_ACTION_SERVICE_URL').rstrip('/')}/health"),
     # Compose service name is books-service; cache key stays book-service for FE.
-    ("book-service", "http://books-service:8004/health"),
-    ("blotter-service", "http://blotter-service:8006/health"),
+    ("book-service", f"{env('BOOKS_SERVICE_URL').rstrip('/')}/health"),
+    ("blotter-service", f"{env('BLOTTER_SERVICE_URL').rstrip('/')}/health"),
 )
 
 

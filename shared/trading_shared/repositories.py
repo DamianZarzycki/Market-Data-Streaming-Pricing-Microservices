@@ -250,6 +250,41 @@ class MarketDataRepository:
         result = await self.db_session.execute(statement)
         return result.scalars().all()
 
+    # Async read: awaits AsyncSession.execute. Sync services keep get_latest_curves.
+    async def get_latest_curves_async(self, curve_type=None, exclude_providers=None):
+        """Latest row per (provider, currency, curve_type)."""
+        statement = self._curves_with_tenors_select()
+        if curve_type:
+            statement = statement.where(MarketDataCurve.curve_type == curve_type)
+        if exclude_providers:
+            statement = statement.where(~MarketDataCurve.provider.in_(exclude_providers))
+        statement = (
+            statement.distinct(
+                MarketDataCurve.provider,
+                MarketDataCurve.currency,
+                MarketDataCurve.curve_type,
+            )
+            .order_by(
+                MarketDataCurve.provider,
+                MarketDataCurve.currency,
+                MarketDataCurve.curve_type,
+                MarketDataCurve.as_of_time.desc(),
+            )
+        )
+        result = await self.db_session.execute(statement)
+        return result.scalars().all()
+
+    # Async read: awaits AsyncSession.execute. Sync services keep get_latest_for_provider.
+    async def get_latest_for_provider_async(self, provider):
+        statement = (
+            self._curves_with_tenors_select()
+            .where(MarketDataCurve.provider == provider)
+            .order_by(MarketDataCurve.as_of_time.desc())
+            .limit(1)
+        )
+        result = await self.db_session.execute(statement)
+        return result.scalars().first()
+
     def add_all(self, market_data_list):
         logging.info(f"Attempt to add {len(market_data_list)} market data records to DB")
         self.db_session.add_all(market_data_list)
@@ -261,6 +296,11 @@ class MarketDataProviderLimitsRepository:
 
     def list_all(self):
         return self.db_session.query(MarketDataProviderLimits).all()
+
+    # Async read: awaits AsyncSession.execute. Sync services keep list_all.
+    async def list_all_async(self):
+        result = await self.db_session.execute(select(MarketDataProviderLimits))
+        return result.scalars().all()
 
 
 class MarketDataProviderRequestRepository:
@@ -276,6 +316,15 @@ class MarketDataProviderRequestRepository:
             .filter(MarketDataProviderRequest.requested_at >= since)
             .all()
         )
+
+    # Async read: awaits AsyncSession.execute. Sync services keep list_since.
+    async def list_since_async(self, since):
+        statement = (
+            select(MarketDataProviderRequest)
+            .where(MarketDataProviderRequest.requested_at >= since)
+        )
+        result = await self.db_session.execute(statement)
+        return result.scalars().all()
 
 
 class MarketDataProviderQuoteRepository:
@@ -360,6 +409,55 @@ class MarketDataProviderQuoteRepository:
             )
             .all()
         )
+
+    # Async read: awaits AsyncSession.execute. Sync services keep get_latest.
+    async def get_latest_async(self, provider, symbol):
+        statement = (
+            select(MarketDataProviderQuote)
+            .where(
+                MarketDataProviderQuote.provider == provider,
+                MarketDataProviderQuote.symbol == symbol,
+            )
+            .order_by(MarketDataProviderQuote.received_at.desc())
+            .limit(1)
+        )
+        result = await self.db_session.execute(statement)
+        return result.scalars().first()
+
+    # Async read: awaits AsyncSession.execute. Sync services keep get_latest_for_symbol.
+    async def get_latest_for_symbol_async(self, symbol, asset_class):
+        statement = (
+            select(MarketDataProviderQuote)
+            .where(
+                MarketDataProviderQuote.symbol == symbol,
+                MarketDataProviderQuote.asset_class == asset_class,
+            )
+            .distinct(MarketDataProviderQuote.provider)
+            .order_by(
+                MarketDataProviderQuote.provider,
+                MarketDataProviderQuote.received_at.desc(),
+            )
+        )
+        result = await self.db_session.execute(statement)
+        return result.scalars().all()
+
+    # Async read: awaits AsyncSession.execute. Sync services keep get_all_latest.
+    async def get_all_latest_async(self):
+        """Latest quote per (provider, symbol). Backs GET /market-data/snapshot."""
+        statement = (
+            select(MarketDataProviderQuote)
+            .distinct(
+                MarketDataProviderQuote.provider,
+                MarketDataProviderQuote.symbol,
+            )
+            .order_by(
+                MarketDataProviderQuote.provider,
+                MarketDataProviderQuote.symbol,
+                MarketDataProviderQuote.received_at.desc(),
+            )
+        )
+        result = await self.db_session.execute(statement)
+        return result.scalars().all()
 
 
 class MarketDataSnapshotRepository:

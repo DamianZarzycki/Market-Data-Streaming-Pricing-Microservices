@@ -1,18 +1,8 @@
-"""Synthetic replacement for the real provider fetch loop behind
-GET /market-data/stream. Emits the same "quote" SSE event shape as the real
-providers (see providers/quota_providers/*.py normalize_data) with a small
-random price drift each tick, so a client can develop against the stream
-without real provider API keys or burning their rate limits.
-
-Not wired to persistence — mock ticks are never written to
-market_data_provider_quotes, so they can't be mistaken for real history.
-"""
-
+import asyncio
 import json
 import logging
 import os
 import random
-import time
 from datetime import datetime, timezone
 
 # Seed prices for the default MARKET_DATA_SYMBOLS universe; anything else
@@ -45,7 +35,8 @@ def _drift(price: float) -> float:
     return round(price * (1 + random.uniform(-JITTER_PCT, JITTER_PCT)), 4)
 
 
-def iter_mock_quote_events(providers: list[str], symbols: list[str]):
+# Async generator: awaits asyncio.sleep between ticks. Mock frames are not persisted.
+async def iter_mock_quote_events(providers: list[str], symbols: list[str]):
     yield ": connected (mock)\n\n"
     interval = mock_interval_seconds()
     prices = {
@@ -79,4 +70,4 @@ def iter_mock_quote_events(providers: list[str], symbols: list[str]):
                     "raw_payload": {"mock": True},
                 }
                 yield f"event: quote\ndata: {json.dumps(payload)}\n\n"
-        time.sleep(interval)
+        await asyncio.sleep(interval)

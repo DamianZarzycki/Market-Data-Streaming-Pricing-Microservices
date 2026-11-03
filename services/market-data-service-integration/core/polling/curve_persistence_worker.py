@@ -1,5 +1,5 @@
+import asyncio
 import logging
-import queue
 import threading
 from datetime import datetime, timezone
 
@@ -11,7 +11,7 @@ from core.polling.config import (
     read_positive_float_env,
     read_positive_int_env,
 )
-from shared.trading_shared.db import DBSessionManager
+from shared.trading_shared.db import AsyncDBSessionManager
 from shared.trading_shared.models import MarketDataCurve, MarketDataSnapshot
 
 
@@ -46,38 +46,20 @@ class CurvePersistenceWorker:
                 DEFAULT_CURVE_PERSIST_FLUSH_SECONDS,
             )
         )
-        self._persist_queue: queue.Queue = queue.Queue(maxsize=self._queue_max_size)
-        self._stop_requested = threading.Event()
+        self._persist_queue: asyncio.Queue = asyncio.Queue(maxsize=self._queue_max_size)
         self._metrics_lock = threading.Lock()
         self._persisted_total = 0
         self._persist_error_total = 0
-        self._thread: threading.Thread | None = None
-
-    def start(self) -> None:
-        self._stop_requested.clear()
-        if self._thread is None or not self._thread.is_alive():
-            self._thread = threading.Thread(
-                target=self._persist_loop,
-                name="market-data-curve-db-worker",
-                daemon=True,
-            )
-            self._thread.start()
-
-    def stop(self) -> None:
-        self._stop_requested.set()
-
-    def join(self, timeout: float | None = None) -> None:
-        if self._thread is not None:
-            self._thread.join(timeout=timeout)
 
     def enqueue_many(self, curve_payloads: list[dict]) -> tuple[int, int]:
+        """put_nowait does not wait, so a full queue drops the curve instead of blocking."""
         enqueued_count = 0
         dropped_count = 0
         for curve_payload in curve_payloads:
             try:
                 self._persist_queue.put_nowait(curve_payload)
                 enqueued_count += 1
-            except queue.Full:
+            except asyncio.QueueFull:
                 dropped_count += 1
                 logging.error(
                     "Curve queue full (size=%s max=%s): dropping provider=%s curve=%s",
@@ -95,7 +77,8 @@ class CurvePersistenceWorker:
         with self._metrics_lock:
             return self._persisted_total, self._persist_error_total
 
-    def _persist_loop(self) -> None:
+    # Async task: awaits the curve queue, then AsyncSession.commit for each batch.
+    async def persist_loop(self) -> None:
         logging.info(
             "Curve DB worker started batch_size=%s flush=%ss queue_max=%s",
             self._persist_batch_size,
@@ -103,29 +86,28 @@ class CurvePersistenceWorker:
             self._persist_queue.maxsize,
         )
         curve_payload_batch: list[dict] = []
-        while True:
-            try:
-                queued_payload = self._persist_queue.get(
-                    timeout=self._flush_interval_seconds
-                )
-            except queue.Empty:
-                self._flush_curve_payload_batch(curve_payload_batch)
-                if self._stop_requested.is_set() and self._persist_queue.empty():
-                    break
-                continue
+        try:
+            while True:
+                try:
+                    queued_payload = await asyncio.wait_for(
+                        self._persist_queue.get(),
+                        timeout=self._flush_interval_seconds,
+                    )
+                except asyncio.TimeoutError:
+                    await self._flush_curve_payload_batch(curve_payload_batch)
+                    continue
 
-            curve_payload_batch.append(queued_payload)
-            self._persist_queue.task_done()
+                curve_payload_batch.append(queued_payload)
+                self._persist_queue.task_done()
+                if len(curve_payload_batch) >= self._persist_batch_size:
+                    await self._flush_curve_payload_batch(curve_payload_batch)
+        except asyncio.CancelledError:
+            await self._flush_curve_payload_batch(curve_payload_batch)
+            logging.info("Curve DB worker stopped")
+            raise
 
-            if len(curve_payload_batch) >= self._persist_batch_size:
-                self._flush_curve_payload_batch(curve_payload_batch)
-            if self._stop_requested.is_set() and self._persist_queue.empty():
-                self._flush_curve_payload_batch(curve_payload_batch)
-                break
-
-        logging.info("Curve DB worker stopped")
-
-    def _flush_curve_payload_batch(self, curve_payload_batch: list[dict]) -> None:
+    # Async: awaits AsyncSession.commit.
+    async def _flush_curve_payload_batch(self, curve_payload_batch: list[dict]) -> None:
         if not curve_payload_batch:
             return
         curve_records = [
@@ -165,11 +147,11 @@ class CurvePersistenceWorker:
         ]
 
         try:
-            with DBSessionManager() as db:
+            async with AsyncDBSessionManager() as db:
                 db.market_data.add_all(curve_records)
                 for snapshot_record in snapshot_records:
                     db.market_data_snapshots.add(snapshot_record)
-                db.commit()
+                await db.commit()
             with self._metrics_lock:
                 self._persisted_total += len(curve_records)
             logging.info("Persisted %s curve record(s) to DB", len(curve_records))

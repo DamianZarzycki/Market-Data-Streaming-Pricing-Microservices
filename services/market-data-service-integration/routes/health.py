@@ -1,14 +1,16 @@
-import logging
+from fastapi import FastAPI, status
 
-from shared.trading_shared.enums import ServiceStatus
+from api.schemas import HealthResponse
+from core.fetch_audit import health_view
 
 
-def register(app, snapshot):
-    @app.route("/health")
-    def health() -> dict:
-        logging.info("Market Data Service Integration health check")
-        return {
-            "service": "market-data-service-integration",
-            "status": ServiceStatus.UP.value,
-            **snapshot(),
-        }
+def register(app: FastAPI) -> None:
+    # Sync handler: copies in-memory fetch counters under a short lock. There is
+    # no non-blocking I/O, so this stays a plain def and runs on the threadpool.
+    @app.get(
+        "/health",
+        response_model=HealthResponse,
+        status_code=status.HTTP_200_OK,
+    )
+    def health() -> HealthResponse:
+        return HealthResponse.model_validate(health_view())

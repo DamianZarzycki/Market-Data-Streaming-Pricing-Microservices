@@ -1,3 +1,1 @@
-from core.polling.orchestrator import PollWorkers
-
-__all__ = ["PollWorkers"]
+"""Polling configuration and workers. Import submodules directly."""

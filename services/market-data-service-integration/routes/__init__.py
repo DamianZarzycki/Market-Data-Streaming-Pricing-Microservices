@@ -6,10 +6,11 @@ from routes.refresh import register as register_refresh
 from routes.stream import register as register_stream
 
 
-def register_routes(app, quote_service, curve_service, snapshot, poll_workers):
-    register_health(app, snapshot)
-    register_providers(app, quote_service, curve_service)
-    register_quotes(app, quote_service)
-    register_stream(app, quote_service)
-    register_curves(app, curve_service)
-    register_refresh(app, poll_workers)
+def register_routes(app) -> None:
+    register_health(app)
+    register_providers(app)
+    register_quotes(app)
+    register_stream(app)
+    # /curves/refresh must be registered before /curves/{provider}.
+    register_refresh(app)
+    register_curves(app)

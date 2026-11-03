@@ -1,22 +1,47 @@
-from bottle import request
+from fastapi import FastAPI, Query, status
+from fastapi.responses import StreamingResponse
 
-from core.helpers import unknown_provider
-
-
-def _wants_mock() -> bool:
-    """?mock=1 (or true/yes) forces the synthetic quote generator for this
-    connection, regardless of MARKET_DATA_MOCK_STREAM — handy for developing
-    against the stream without real provider API keys or rate limits."""
-    return (request.query.get("mock") or "").strip().lower() in ("1", "True", "yes")
+from api.schemas import QuoteStreamFrame
+from core.stream_hub import open_quote_stream
 
 
-def register(app, quote_service):
-    @app.route("/market-data/stream")
-    def stream_all():
-        return quote_service().stream_quotes(None, mock=_wants_mock())
+def register(app: FastAPI) -> None:
+    # Async handler: the body awaits asyncio.Queue.get (or asyncio.sleep when
+    # mock is on), which suspends this request and does not hold a thread.
+    # Each frame is `event: quote` plus one quote. The body is not a JSON document.
+    @app.get(
+        "/market-data/stream",
+        status_code=status.HTTP_200_OK,
+        response_class=StreamingResponse,
+        responses={
+            200: {
+                "description": "SSE frames. Each frame is one quote.",
+                "model": QuoteStreamFrame,
+            }
+        },
+    )
+    async def stream_all(mock: str = Query("")):
+        return StreamingResponse(
+            open_quote_stream(None, mock),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache"},
+        )
 
-    @app.route("/market-data/stream/<provider>")
-    def stream_provider(provider):
-        if provider not in quote_service().providers:
-            return unknown_provider(provider)
-        return quote_service().stream_quotes({provider}, mock=_wants_mock())
+    # Async handler: the body awaits asyncio.Queue.get for this provider only.
+    @app.get(
+        "/market-data/stream/{provider}",
+        status_code=status.HTTP_200_OK,
+        response_class=StreamingResponse,
+        responses={
+            200: {
+                "description": "SSE frames for one provider. Each frame is one quote.",
+                "model": QuoteStreamFrame,
+            }
+        },
+    )
+    async def stream_provider(provider: str, mock: str = Query("")):
+        return StreamingResponse(
+            open_quote_stream(provider, mock),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache"},
+        )

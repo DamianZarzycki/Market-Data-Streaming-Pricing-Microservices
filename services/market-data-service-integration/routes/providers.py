@@ -1,22 +1,39 @@
-from core.helpers import unknown_provider
-from core.provider_health import probe_provider, probe_quote_providers
+from fastapi import FastAPI, status
+
+from api.schemas import ProviderProbe, ProvidersHealthResponse, ProvidersResponse
+from core import state
+from core.provider_health import list_provider_names, probe_quote_providers, provider_health
 
 
-def register(app, quote_service, curve_service):
-    @app.route("/providers")
-    def providers():
-        return {
-            "providers": list(quote_service().providers.keys()),
-            "curve_providers": list(curve_service().providers.keys()),
-        }
+def register(app: FastAPI) -> None:
+    # Sync handler: returns provider names already held in memory. There is no
+    # non-blocking I/O, so this stays a plain def and runs on the threadpool.
+    @app.get(
+        "/providers",
+        response_model=ProvidersResponse,
+        status_code=status.HTTP_200_OK,
+    )
+    def providers() -> dict:
+        return list_provider_names(state.get_quote_service(), state.get_curve_service())
 
-    @app.route("/providers/health")
-    def providers_health():
-        return probe_quote_providers(quote_service())
+    # Async handler: awaits asyncio.gather of the live quote probes.
+    @app.get(
+        "/providers/health",
+        response_model=ProvidersHealthResponse,
+        status_code=status.HTTP_200_OK,
+    )
+    async def providers_health() -> dict:
+        return await probe_quote_providers(state.get_quote_service())
 
-    @app.route("/providers/<provider>/health")
-    def provider_health(provider):
-        result = probe_provider(quote_service(), curve_service(), provider)
-        if result is None:
-            return unknown_provider(provider)
-        return result
+    # Async handler: awaits AsyncClient.get for that provider.
+    @app.get(
+        "/providers/{provider}/health",
+        response_model=ProviderProbe,
+        status_code=status.HTTP_200_OK,
+    )
+    async def one_provider_health(provider: str) -> dict:
+        return await provider_health(
+            state.get_quote_service(),
+            state.get_curve_service(),
+            provider,
+        )

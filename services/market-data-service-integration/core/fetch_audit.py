@@ -1,9 +1,10 @@
 import copy
+import logging
 import threading
 from datetime import datetime, timezone
 
 from core.audit_worker import enqueue
-from shared.trading_shared.enums import EventType, Severity
+from shared.trading_shared.enums import EventType, ServiceStatus, Severity
 
 QUOTE_SERVICE = "quote_service"
 CURVE_SERVICE = "curve_service"
@@ -116,8 +117,19 @@ def record_error(source: str, payload: dict) -> None:
 
 
 def snapshot() -> dict:
+    """Copy the in-memory fetch counters. The lock is short, so this stays synchronous."""
     with _lock:
         return {
             QUOTE_SERVICE: copy.deepcopy(_state[QUOTE_SERVICE]),
             CURVE_SERVICE: copy.deepcopy(_state[CURVE_SERVICE]),
         }
+
+
+def health_view() -> dict:
+    """In-memory health payload. There is no non-blocking I/O."""
+    logging.info("Market Data Service Integration health check")
+    return {
+        "service": "market-data-service-integration",
+        "status": ServiceStatus.UP.value,
+        **snapshot(),
+    }
