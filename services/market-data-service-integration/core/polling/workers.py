@@ -3,17 +3,16 @@ import logging
 import time
 
 from core.curve_service import CurveService, quote_from_yield_curve
-from core.polling.config import (
+from core.polling.env import now_utc_iso
+from shared.trading_shared.env import env_float
+from core.polling.curve_persistence_worker import CurvePersistenceWorker
+from core.polling.symbols import (
     futures_quotes_for_equity,
-    now_utc_iso,
-    read_curve_poll_interval_seconds,
-    read_poll_interval_seconds,
     read_poll_symbols,
     read_symbol_map,
 )
-from core.polling.curve_persistence_worker import CurvePersistenceWorker
-from core.quote_service import QuoteService
-from core.stream_hub import publish_quote
+from core.quotes import QuoteService
+from core.stream import publish_quote
 
 
 class PollWorkers:
@@ -26,11 +25,14 @@ class PollWorkers:
     ):
         self.quote_service = quote_service
         self.curve_service = curve_service
-        self.interval_seconds = interval_seconds or read_poll_interval_seconds()
+        self.interval_seconds = interval_seconds or max(
+            env_float("MARKET_DATA_POLL_INTERVAL_SECONDS", 30.0),
+            1.0,
+        )
         self.curve_interval_seconds = (
             curve_interval_seconds
             if curve_interval_seconds is not None
-            else read_curve_poll_interval_seconds()
+            else max(env_float("CURVE_DATA_REFRESH_INTERVAL_SECONDS", 3600.0), 1.0)
         )
         self._quote_cycle_lock = asyncio.Lock()
         self._curve_cycle_lock = asyncio.Lock()

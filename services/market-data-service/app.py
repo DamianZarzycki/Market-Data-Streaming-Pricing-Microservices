@@ -10,7 +10,7 @@ from shared.trading_shared.enums import EventType
 from shared.trading_shared.logging_config import configure_logging
 
 import worker
-from api.errors import install_error_handlers
+from shared.trading_shared.http_errors import install_error_handlers
 from routes import register_routes
 
 configure_logging("market-data-service")

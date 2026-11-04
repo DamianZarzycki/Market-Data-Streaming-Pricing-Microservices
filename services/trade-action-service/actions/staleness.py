@@ -1,12 +1,12 @@
-import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 
-from db.async_session import AsyncDBSessionManager
+from shared.trading_shared.db import AsyncDBSessionManager
+from shared.trading_shared.env import env_int
 from shared.trading_shared.market_data import max_quote_age_seconds
 
-MAX_CLOCK_SKEW_SECONDS = int(os.getenv("TRADE_ACTION_MAX_CLOCK_SKEW_SECONDS", "5"))
+MAX_CLOCK_SKEW_SECONDS = env_int("TRADE_ACTION_MAX_CLOCK_SKEW_SECONDS", 5, minimum=0)
 
 
 class QuoteStaleness(Enum):
@@ -64,7 +64,7 @@ async def check_provider_data_staleness(provider_name, symbol) -> StalenessResul
         )
 
     async with AsyncDBSessionManager() as db:
-        quote = await db.provider_quotes.get_latest_freshness(provider_name, symbol)
+        quote = await db.provider_quotes.get_latest_freshness_async(provider_name, symbol)
         if quote is None:
             return StalenessResult(
                 reason=QuoteStaleness.NO_QUOTE,

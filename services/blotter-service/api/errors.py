@@ -1,19 +1,14 @@
-import logging
-
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+
+from shared.trading_shared.http_errors import (
+    ApiError,
+    install_error_handlers as install_shared_error_handlers,
+)
 
 SUMMARY_FAILED = "Failed to fetch book summary"
 TRADE_NOT_FOUND = "Trade not found"
 INVALID_PAGE = "Invalid page or limit"
-
-
-class ApiError(Exception):
-    def __init__(self, status_code: int, message: str):
-        self.status_code = status_code
-        self.message = message
-        super().__init__(message)
 
 
 def classify_validation(exc: RequestValidationError) -> tuple[int, str]:
@@ -25,23 +20,9 @@ def classify_validation(exc: RequestValidationError) -> tuple[int, str]:
     return status.HTTP_400_BAD_REQUEST, INVALID_PAGE
 
 
+def _classify(_request: Request, exc: RequestValidationError) -> tuple[int, str]:
+    return classify_validation(exc)
+
+
 def install_error_handlers(app: FastAPI) -> None:
-    @app.exception_handler(ApiError)
-    async def api_error(_request: Request, exc: ApiError):
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={"error": exc.message},
-        )
-
-    @app.exception_handler(RequestValidationError)
-    async def validation_error(_request: Request, exc: RequestValidationError):
-        status_code, message = classify_validation(exc)
-        return JSONResponse(status_code=status_code, content={"error": message})
-
-    @app.exception_handler(Exception)
-    async def unexpected(request: Request, exc: Exception):
-        logging.exception("Error handling %s %s", request.method, request.url.path)
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": "Internal server error"},
-        )
+    install_shared_error_handlers(app, classify=_classify)

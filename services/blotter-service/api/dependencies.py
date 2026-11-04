@@ -1,50 +1,36 @@
 import logging
-from collections.abc import Iterator
+import sys
+from collections.abc import AsyncIterator
 
 from fastapi import status
-from sqlalchemy.orm import Session
-
-from shared.trading_shared.db import SessionLocal
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.errors import SUMMARY_FAILED, ApiError
+from shared.trading_shared.db import get_async_db
 import trades_service
 
 
-def get_db() -> Iterator[Session]:
-    """One transaction per request. Commit on success, rollback and close on failure.
-
-    A session left open stays idle in a transaction and Postgres cannot vacuum.
-    """
-    db = SessionLocal()
-    try:
-        yield db
-        if db.in_transaction():
-            db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
-
-
-def get_summary_db() -> Iterator[tuple[dict, Session]]:
+async def get_summary_db() -> AsyncIterator[tuple[dict, AsyncSession]]:
     """Fetch books-service before checking out a connection.
 
     The catalogue call has a 2 second timeout. Holding a pooled connection
     across that wait would pin a backend for a neighbour that may be down.
+    The request exception is thrown into `get_async_db` so a failed request
+    rolls back instead of committing.
     """
     try:
-        payload = trades_service.fetch_books_payload()
+        payload = await trades_service.fetch_books_payload()
     except Exception:
         logging.exception("Failed to fetch book summary")
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, SUMMARY_FAILED) from None
-    db = SessionLocal()
+    session_gen = get_async_db()
+    session = await anext(session_gen)
     try:
-        yield payload, db
-        if db.in_transaction():
-            db.commit()
+        yield payload, session
     except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
+        await session_gen.athrow(sys.exception())
+    else:
+        try:
+            await anext(session_gen)
+        except StopAsyncIteration:
+            pass

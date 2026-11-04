@@ -2,7 +2,7 @@ from fastapi import FastAPI, Query, status
 from fastapi.responses import StreamingResponse
 
 from api.schemas import QuoteStreamFrame
-from core.stream_hub import open_quote_stream
+from core.stream import open_quote_stream
 
 
 def register(app: FastAPI) -> None:

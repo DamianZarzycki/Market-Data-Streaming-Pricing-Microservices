@@ -6,12 +6,12 @@ from urllib import request
 from cache.valuation_cache_service import ValuationCacheService
 from shared.trading_shared.audit import AuditLogger
 from shared.trading_shared.enums import EventType
-from shared.trading_shared.env import env
+from shared.trading_shared.env import env, env_float, env_int
 
-MAX_RECONNECT_DELAY = 30
-BASE_RECONNECT_DELAY = 1
+MAX_RECONNECT_DELAY = env_int("BLOTTER_MAX_RECONNECT_DELAY_SECONDS", 30)
+BASE_RECONNECT_DELAY = env_int("BLOTTER_BASE_RECONNECT_DELAY_SECONDS", 1, minimum=0)
 STREAM_URL = f"{env('PRICING_SERVICE_URL').rstrip('/')}/valuation-stream"
-STREAM_TIMEOUT_SECONDS = 30
+STREAM_TIMEOUT_SECONDS = env_float("BLOTTER_STREAM_TIMEOUT_SECONDS", 30.0, minimum=0.1)
 
 cache_service = ValuationCacheService()
 audit_logger = AuditLogger("blotter-service")

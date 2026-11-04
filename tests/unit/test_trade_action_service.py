@@ -25,7 +25,7 @@ class _Quotes:
         self.quote = quote
         self.calls = 0
 
-    async def get_latest_freshness(self, provider, symbol):
+    async def get_latest_freshness_async(self, provider, symbol):
         self.calls += 1
         return self.quote
 
@@ -62,6 +62,7 @@ def _client():
         stack.enter_context(patch.object(app_module.AuditLogger, "info"))
         stack.enter_context(patch.object(app_module.AuditLogger, "warning"))
         stack.enter_context(patch.object(app_module.AuditLogger, "error"))
+        stack.enter_context(patch.object(app_module.AuditLogger, "ainfo", new_callable=AsyncMock))
         audit = stack.enter_context(patch.object(submit_mod, "_audit", AsyncMock()))
         client = stack.enter_context(
             TestClient(app_module.app, raise_server_exceptions=False)
@@ -343,18 +344,12 @@ def test_batch_shape_errors_are_400():
 
 
 def test_request_body_over_the_cap_is_413():
-    from importlib.util import module_from_spec, spec_from_file_location
+    from shared.trading_shared.http_errors import MAX_BODY_BYTES
 
-    spec = spec_from_file_location(
-        "trade_action_body_limit",
-        BACKEND / "services" / "trade-action-service" / "api" / "body_limit.py",
-    )
-    module = module_from_spec(spec)
-    spec.loader.exec_module(module)
     with _client() as (client, _, _, _):
         response = client.post(
             "/trade-actions",
-            content=b"x" * (module.MAX_BODY_BYTES + 1),
+            content=b"x" * (MAX_BODY_BYTES + 1),
             headers={"content-type": "application/json"},
         )
     assert response.status_code == 413, response.text

@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI
 
-from api.errors import install_error_handlers
+from shared.trading_shared.http_errors import install_error_handlers
 from routes import register_routes
 from shared.trading_shared.db import dispose_async_engine
 from shared.trading_shared.enums import EventType

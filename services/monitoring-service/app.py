@@ -8,6 +8,8 @@ from fastapi import FastAPI
 
 from shared.trading_shared.audit import AuditLogger
 from shared.trading_shared.enums import EventType
+from shared.trading_shared.env import env_float
+from shared.trading_shared.http_errors import install_error_handlers
 from shared.trading_shared.logging_config import configure_logging
 
 import worker
@@ -26,7 +28,7 @@ async def lifespan(app: FastAPI):
         entity_type="Service",
         correlation_id=None,
     )
-    client = httpx2.AsyncClient(timeout=2.0)
+    client = httpx2.AsyncClient(timeout=env_float("MONITORING_PROBE_TIMEOUT_SECONDS", 2.0, minimum=0.1))
     task = asyncio.create_task(worker.monitoring_worker(client))
     try:
         yield
@@ -49,6 +51,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+install_error_handlers(app)
 register_routes(app)
 
 

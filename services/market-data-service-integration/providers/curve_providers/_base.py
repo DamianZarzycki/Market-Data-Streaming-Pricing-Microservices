@@ -1,7 +1,7 @@
 import json
 from datetime import datetime, timezone
 
-from core.http import client
+from core.runtime import client
 
 
 DEFAULT_HEADERS = {

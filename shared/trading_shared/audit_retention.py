@@ -1,16 +1,16 @@
 import logging
-import os
 import threading
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text
 
 from shared.trading_shared.db import SessionLocal
+from shared.trading_shared.env import env_int
 from shared.trading_shared.models import AuditLog
 
-AUDIT_RETENTION_DAYS = int(os.getenv("AUDIT_RETENTION_DAYS", "90"))
-PURGE_BATCH_SIZE = 1000
-PURGE_INTERVAL_SECONDS = 24 * 60 * 60
+AUDIT_RETENTION_DAYS = env_int("AUDIT_RETENTION_DAYS", 90)
+PURGE_BATCH_SIZE = env_int("AUDIT_PURGE_BATCH_SIZE", 1000)
+PURGE_INTERVAL_SECONDS = env_int("AUDIT_PURGE_INTERVAL_SECONDS", 24 * 60 * 60)
 # Session-level advisory lock. Commits do not release it, so one purge can
 # commit each batch without letting a second process delete at the same time.
 AUDIT_RETENTION_LOCK_KEY = 881512090

@@ -4,7 +4,7 @@ from typing import Any
 from fastapi import Body, FastAPI
 
 import worker
-from api.errors import ApiError
+from shared.trading_shared.http_errors import ApiError
 from generator.intentions import (
     generate_and_send_to_trade_action_service,
     generate_and_send_to_trade_action_service_batch,

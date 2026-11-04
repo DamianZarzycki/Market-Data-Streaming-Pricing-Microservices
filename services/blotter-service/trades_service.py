@@ -1,32 +1,48 @@
+import asyncio
 import logging
-import threading
 
 import httpx2
-from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy import func, select
 
 from shared.trading_shared.enums import TradeStatus
-from shared.trading_shared.env import env
+from shared.trading_shared.env import env, env_float
 from shared.trading_shared.models import Trade
 from shared.trading_shared.repositories import TradeRepository, ValuationRepository
 from shared.trading_shared.serialization import serialize
 from cache.valuation_cache_service import ValuationCacheService
 
 BOOKS_URL = f"{env('BOOKS_SERVICE_URL').rstrip('/')}/books"
-BOOKS_TIMEOUT_SECONDS = 2.0
-_BOOKS_CALLS = threading.Semaphore(10)
+BOOKS_TIMEOUT_SECONDS = env_float("BLOTTER_BOOKS_TIMEOUT_SECONDS", 2.0, minimum=0.1)
+_BOOKS_CALLS = asyncio.Semaphore(10)
+_http_client: httpx2.AsyncClient | None = None
 
 _cache = ValuationCacheService()
 
 
-def fetch_books_payload() -> dict:
+def open_http() -> httpx2.AsyncClient:
+    """One client for the process. Callers await get(); the semaphore caps how many wait at once."""
+    global _http_client
+    _http_client = httpx2.AsyncClient(timeout=BOOKS_TIMEOUT_SECONDS)
+    return _http_client
+
+
+async def close_http() -> None:
+    global _http_client
+    client = _http_client
+    _http_client = None
+    if client is not None:
+        await client.aclose()
+
+
+async def fetch_books_payload() -> dict:
     """Read the book catalogue. Callers open a database session only after this returns."""
-    with _BOOKS_CALLS:
+    if _http_client is None:
+        raise RuntimeError("books-service client is not open")
+    async with _BOOKS_CALLS:
         try:
-            with httpx2.Client(timeout=BOOKS_TIMEOUT_SECONDS) as client:
-                response = client.get(BOOKS_URL)
-                status_code = response.status_code
-                payload = response.json() if status_code == 200 else None
+            response = await _http_client.get(BOOKS_URL)
+            status_code = response.status_code
+            payload = response.json() if status_code == 200 else None
         except Exception as exc:
             raise RuntimeError("books-service request failed") from exc
     if status_code != 200:
@@ -38,17 +54,16 @@ def fetch_books_payload() -> dict:
     return payload
 
 
-def _active_counts(session: Session) -> dict[str, int]:
-    rows = (
-        session.query(Trade.book_id, func.count())
-        .filter(Trade.status == TradeStatus.ACTIVE.value)
+async def _active_counts(session) -> dict[str, int]:
+    result = await session.execute(
+        select(Trade.book_id, func.count())
+        .where(Trade.status == TradeStatus.ACTIVE.value)
         .group_by(Trade.book_id)
-        .all()
     )
-    return {str(book_id): int(count) for book_id, count in rows}
+    return {str(book_id): int(count) for book_id, count in result.all()}
 
 
-def build_book_summary(payload: dict, session: Session) -> dict:
+async def build_book_summary(payload: dict, session) -> dict:
     """Attach PnL and active-trade counts to the books-service catalogue."""
     books = payload.get("books") or []
     aggregates = {
@@ -61,7 +76,7 @@ def build_book_summary(payload: dict, session: Session) -> dict:
         if isinstance(book, dict) and book.get("book_id")
     }
 
-    for book_id, count in _active_counts(session).items():
+    for book_id, count in (await _active_counts(session)).items():
         if book_id in aggregates:
             aggregates[book_id]["active_trades"] = count
 
@@ -84,8 +99,8 @@ def build_book_summary(payload: dict, session: Session) -> dict:
     return payload
 
 
-def fetch_trades(
-    session: Session,
+async def fetch_trades(
+    session,
     *,
     book_id,
     asset_class,
@@ -95,7 +110,7 @@ def fetch_trades(
     page,
     limit,
 ):
-    rows = TradeRepository(session).get_trades(
+    rows = await TradeRepository(session).get_trades_async(
         book_id=book_id,
         asset_class=asset_class,
         status=status,
@@ -116,12 +131,12 @@ def fetch_trades(
     ]
 
 
-def fetch_trade_by_id(session: Session, trade_id: str):
-    trade = TradeRepository(session).get_by_id(trade_id)
+async def fetch_trade_by_id(session, trade_id: str):
+    trade = await TradeRepository(session).get_by_id_async(trade_id)
     if not trade:
         return None
     serialized_trade = serialize(trade)
-    valuations = ValuationRepository(session).get_valuations_by_trade_id(trade_id)
+    valuations = await ValuationRepository(session).get_valuations_by_trade_id_async(trade_id)
     return {
         "trade": serialized_trade,
         "latest_valuation": _cache.get_latest_valuation(trade_id),
@@ -130,6 +145,6 @@ def fetch_trade_by_id(session: Session, trade_id: str):
     }
 
 
-def fetch_trade_valuations(session: Session, trade_id: str):
-    valuations = ValuationRepository(session).get_valuations_by_trade_id(trade_id)
+async def fetch_trade_valuations(session, trade_id: str):
+    valuations = await ValuationRepository(session).get_valuations_by_trade_id_async(trade_id)
     return [serialize(valuation) for valuation in valuations]

@@ -1,8 +1,8 @@
 from fastapi import FastAPI, Query, status
 
 from api.schemas import QuoteResponse, QuotesResponse, SnapshotResponse, SymbolMapResponse
-from core import state
-from core.polling.config import symbol_catalog
+from core import runtime
+from core.polling import symbol_catalog
 from shared.trading_shared.enums import AssetClass
 
 
@@ -25,7 +25,7 @@ def register(app: FastAPI) -> None:
         status_code=status.HTTP_200_OK,
     )
     async def market_data_snapshot() -> dict:
-        return await state.get_quote_service().get_snapshot()
+        return await runtime.get_quote_service().get_snapshot()
 
     # Async handler: awaits provider_quotes.get_latest_for_symbol_async.
     @app.get(
@@ -38,7 +38,7 @@ def register(app: FastAPI) -> None:
         symbol: str = Query(""),
         asset_class: str = Query(AssetClass.EQUITY.value),
     ) -> dict:
-        return await state.get_quote_service().get_quotes(symbol, asset_class)
+        return await runtime.get_quote_service().get_quotes(symbol, asset_class)
 
     # Async handler: awaits provider_quotes.get_latest_async.
     @app.get(
@@ -48,4 +48,4 @@ def register(app: FastAPI) -> None:
         status_code=status.HTTP_200_OK,
     )
     async def quote_by_provider(provider: str, symbol: str) -> dict:
-        return await state.get_quote_service().get_quote(provider, symbol)
+        return await runtime.get_quote_service().get_quote(provider, symbol)

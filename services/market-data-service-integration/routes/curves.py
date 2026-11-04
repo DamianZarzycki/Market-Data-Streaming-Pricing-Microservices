@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Query, status
 
 from api.schemas import CurveResponse, CurvesResponse, QuotesResponse
-from core import state
+from core import runtime
 
 
 def register(app: FastAPI) -> None:
@@ -13,7 +13,7 @@ def register(app: FastAPI) -> None:
         status_code=status.HTTP_200_OK,
     )
     async def fx_quotes(symbol: str = Query("")) -> dict:
-        return await state.get_curve_service().fx_quotes(symbol)
+        return await runtime.get_curve_service().fx_quotes(symbol)
 
     # Async handler: awaits the FRED or ECB curve read.
     @app.get(
@@ -23,7 +23,7 @@ def register(app: FastAPI) -> None:
         status_code=status.HTTP_200_OK,
     )
     async def curve_quotes(symbol: str = Query(""), asset_class: str = Query("")) -> dict:
-        return await state.get_curve_service().curve_quotes(symbol, asset_class)
+        return await runtime.get_curve_service().curve_quotes(symbol, asset_class)
 
     # Async handler: awaits market_data.get_latest_curves_async.
     @app.get(
@@ -33,7 +33,7 @@ def register(app: FastAPI) -> None:
         status_code=status.HTTP_200_OK,
     )
     async def curves() -> dict:
-        return await state.get_curve_service().list_persisted()
+        return await runtime.get_curve_service().list_persisted()
 
     # Async handler: awaits market_data.get_latest_for_provider_async.
     @app.get(
@@ -43,4 +43,4 @@ def register(app: FastAPI) -> None:
         status_code=status.HTTP_200_OK,
     )
     async def curve_by_provider(provider: str) -> dict:
-        return await state.get_curve_service().curve_for_provider(provider)
+        return await runtime.get_curve_service().curve_for_provider(provider)

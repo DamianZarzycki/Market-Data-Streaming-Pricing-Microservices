@@ -1,10 +1,10 @@
 import logging
-import os
 from datetime import datetime, timezone
 
 from providers.quota_providers._base import BaseProvider, ProviderAPIError
+from shared.trading_shared.env import env_str
 
-api_key: str = os.getenv("FINNHUB_API_KEY") or ""
+api_key: str = env_str("FINNHUB_API_KEY", "")
 
 
 class FinnhubProvider(BaseProvider):

@@ -131,7 +131,7 @@ def _provider_close_price(quote, trade, is_long: bool):
 
 async def _resolve_close_price(db, trade, data, is_long: bool):
     if trade.market_data_provider:
-        latest_quote = await db.provider_quotes.get_latest_close_price(
+        latest_quote = await db.provider_quotes.get_latest_close_price_async(
             trade.market_data_provider, trade.symbol
         )
         if latest_quote is None:
@@ -215,7 +215,7 @@ def _mark_closed(db, trade, data, close_price, market_data_timestamp, client_req
 async def close_trade(db, data, *, action_type, client_request_id, symbol, enqueued_at) -> ClosedTrade | None:
     trade_id = data.get("trade_id") or None
     logging.info("Closing trade %s", trade_id)
-    trade = await db.lock_trade(trade_id)
+    trade = await db.trades.lock_trade(trade_id)
     if trade is None:
         await _missing_trade(db, trade_id, action_type, client_request_id, symbol, enqueued_at)
         return None

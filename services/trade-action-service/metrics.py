@@ -1,16 +1,16 @@
-import os
 import threading
 import time
 from collections import deque
 from datetime import datetime, timezone
 
 from shared.trading_shared.enums import ServiceStatus
+from shared.trading_shared.env import env_int
 
-QUEUE_MAXSIZE = int(os.getenv("TRADE_ACTION_QUEUE_MAXSIZE", "100"))
-RECENT_ACTIONS_LIMIT = 50
-RECENT_REJECTS_LIMIT = 20
-THROUGHPUT_WINDOW_S = 60
-PRESSURE_FILL_PCT = 70
+QUEUE_MAXSIZE = env_int("TRADE_ACTION_QUEUE_MAXSIZE", 100)
+RECENT_ACTIONS_LIMIT = env_int("TRADE_ACTION_RECENT_ACTIONS_LIMIT", 50)
+RECENT_REJECTS_LIMIT = env_int("TRADE_ACTION_RECENT_REJECTS_LIMIT", 20)
+THROUGHPUT_WINDOW_S = env_int("TRADE_ACTION_THROUGHPUT_WINDOW_SECONDS", 60)
+PRESSURE_FILL_PCT = env_int("TRADE_ACTION_PRESSURE_FILL_PCT", 70, minimum=0)
 
 _lock = threading.Lock()
 _state = {

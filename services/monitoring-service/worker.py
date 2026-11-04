@@ -6,7 +6,9 @@ import time
 import httpx2
 
 from shared.trading_shared.enums import ServiceStatus
-from shared.trading_shared.env import env
+from shared.trading_shared.env import env, env_float
+
+PROBE_INTERVAL_SECONDS = env_float("MONITORING_PROBE_INTERVAL_SECONDS", 1.0, minimum=0.1)
 
 from state import _iso_now, state
 
@@ -128,4 +130,4 @@ async def probe_once(client: httpx2.AsyncClient) -> None:
 async def monitoring_worker(client: httpx2.AsyncClient):
     while True:
         await probe_once(client)
-        await asyncio.sleep(1)
+        await asyncio.sleep(PROBE_INTERVAL_SECONDS)

@@ -7,25 +7,24 @@ from fastapi import FastAPI
 
 import metrics
 import worker
-from db import async_session
-from api.body_limit import MaxBodySizeMiddleware
 from api.errors import install_error_handlers
 from routes import register_routes
 from shared.trading_shared.audit import AuditLogger
+from shared.trading_shared.db import dispose_async_engine
 from shared.trading_shared.enums import EventType
+from shared.trading_shared.http_errors import MaxBodySizeMiddleware
 from shared.trading_shared.logging_config import configure_logging
 
 configure_logging("trade-action-service")
 
 
 # Async lifespan: FastAPI drives startup and shutdown as a coroutine. The worker
-# is an asyncio task on this loop, cancelled on shutdown. The start/stop service
-# audits still block, so they run through asyncio.to_thread.
+# is an asyncio task on this loop, cancelled on shutdown. Start/stop audits use
+# the shared async session, the same pool as the request handler.
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     audit_logger = AuditLogger("trade-action-service")
-    await asyncio.to_thread(
-        audit_logger.info,
+    await audit_logger.ainfo(
         EventType.WORKER_STARTED,
         "Trade Action service started",
         entity_type="Service",
@@ -44,14 +43,13 @@ async def lifespan(app: FastAPI):
             await task
         except asyncio.CancelledError:
             pass
-        await async_session.dispose()
-        await asyncio.to_thread(
-            audit_logger.info,
+        await audit_logger.ainfo(
             EventType.WORKER_STOPPED,
             "Trade Action Worker stopped",
             entity_type="Service",
             correlation_id=None,
         )
+        await dispose_async_engine()
 
 
 app = FastAPI(lifespan=lifespan)

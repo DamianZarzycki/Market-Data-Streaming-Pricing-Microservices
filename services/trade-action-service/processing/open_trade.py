@@ -223,7 +223,7 @@ async def open_trade(db, data, *, action_type, client_request_id, symbol, enqueu
     book_id = data.get("book_id")
     asset_class = data.get("asset_class")
     symbol = data.get("symbol")
-    instrument = await db.instruments.get_by_symbol(symbol)
+    instrument = await db.instruments.get_by_symbol_async(symbol)
     if not instrument:
         logging.info("Instrument not found: %s. Creating new instrument.", symbol)
         instrument = Instrument(symbol=symbol, asset_class=asset_class, multiplier=1)

@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-import os
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -11,6 +10,7 @@ from market_data_simulator import MarketDataSimulator
 
 from shared.trading_shared.audit import AuditLogger
 from shared.trading_shared.db import AsyncDBSessionManager
+from shared.trading_shared.env import env_int
 from shared.trading_shared.enums import (
     AssetClass,
     CurveType,
@@ -41,7 +41,7 @@ health_stats = {
     "last_symbol": None,
     "last_asset_type": None,
 }
-batch_size = 30
+batch_size = env_int("MARKET_DATA_PERSIST_BATCH_SIZE", 30)
 
 market_simulator = MarketDataSimulator()
 
@@ -305,8 +305,7 @@ async def persist_full_snapshot(market_tick_data):
 
 # Async task: awaits the curve commit and asyncio.sleep. Neither blocks the event loop.
 async def market_worker():
-    interval_ms_str = os.getenv("TICK_INTERVAL_MS", "100")
-    interval_ms = int(interval_ms_str)
+    interval_ms = env_int("TICK_INTERVAL_MS", 100)
     sleep_seconds = interval_ms / 1000.0
 
     while True:

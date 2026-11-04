@@ -7,10 +7,11 @@ from uuid import UUID
 
 from fastapi import status
 
-from api.errors import ApiError
+from shared.trading_shared.env import env_int
+from shared.trading_shared.http_errors import ApiError
 from calculation.valuation_state import valuation_state
 
-SSE_QUEUE_MAX = 256
+SSE_QUEUE_MAX = env_int("PRICING_SSE_QUEUE_MAX", 256)
 _UNCHANGED_FIELDS = ("fair_value", "current_price", "unrealized_pnl", "is_stale")
 
 

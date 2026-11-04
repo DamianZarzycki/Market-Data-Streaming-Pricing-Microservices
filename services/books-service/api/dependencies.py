@@ -1,32 +1,27 @@
-from collections.abc import Iterator
+import sys
+from collections.abc import AsyncIterator
 from uuid import UUID
 
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from shared.trading_shared.db import SessionLocal
-
-
-def get_db() -> Iterator[Session]:
-    """One transaction per request. Commit on success, rollback and close on failure.
-
-    A session left open stays idle in a transaction and Postgres cannot vacuum.
-    """
-    db = SessionLocal()
-    try:
-        yield db
-        if db.in_transaction():
-            db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
+from shared.trading_shared.db import get_async_db
 
 
-def get_book_db(book_id: UUID) -> Iterator[Session]:
+async def get_book_db(book_id: UUID) -> AsyncIterator[AsyncSession]:
     """Open a session only after `book_id` has parsed as a UUID.
 
     FastAPI resolves `book_id` before entering this dependency, so a bad path
-    does not check out a connection.
+    does not check out a connection. The request exception is thrown into
+    `get_async_db` so a failed request rolls back instead of committing.
     """
-    yield from get_db()
+    session_gen = get_async_db()
+    session = await anext(session_gen)
+    try:
+        yield session
+    except Exception:
+        await session_gen.athrow(sys.exception())
+    else:
+        try:
+            await anext(session_gen)
+        except StopAsyncIteration:
+            pass

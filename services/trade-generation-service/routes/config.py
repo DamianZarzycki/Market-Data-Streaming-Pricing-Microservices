@@ -3,7 +3,7 @@ from typing import Any
 
 from fastapi import Body, FastAPI
 
-from api.errors import ApiError
+from shared.trading_shared.http_errors import ApiError
 from generator.config import get_config, publish_config, validated_config
 from generator.http import set_trade_action_provider_mode
 from generator.lifecycle import generation_lock

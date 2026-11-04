@@ -1,7 +1,7 @@
 import asyncio
 from abc import ABC, abstractmethod
 
-from core.http import client
+from core.runtime import client
 
 
 class ProviderAPIError(Exception):

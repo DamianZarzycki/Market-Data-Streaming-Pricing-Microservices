@@ -1,6 +1,7 @@
 import logging
-import os
 import sys
+
+from shared.trading_shared.env import env_str
 
 DEFAULT_LEVEL = "INFO"
 LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(service)s | %(name)s | %(message)s"
@@ -11,7 +12,7 @@ def _resolve_level(level=None):
     """Resolve the effective log level from an explicit value or the LOG_LEVEL env var."""
     if level is not None:
         return level
-    env_level = os.getenv("LOG_LEVEL", DEFAULT_LEVEL).upper()
+    env_level = env_str("LOG_LEVEL", DEFAULT_LEVEL).upper()
     return getattr(logging, env_level, logging.INFO)
 
 

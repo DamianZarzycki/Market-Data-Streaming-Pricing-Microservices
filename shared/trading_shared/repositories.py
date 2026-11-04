@@ -71,8 +71,64 @@ class TradeRepository:
             .all()
         )
 
+    # Async read: awaits AsyncSession.execute. Sync callers keep get_by_id.
+    async def get_by_id_async(self, trade_id):
+        result = await self.db_session.execute(
+            select(Trade).where(Trade.trade_id == trade_id).limit(1)
+        )
+        return result.scalars().first()
+
+    # Async read: same filters as get_trades, without FOR UPDATE.
+    async def get_trades_async(
+        self,
+        client_request_id=None,
+        book_id=None,
+        asset_class=None,
+        status=None,
+        symbol=None,
+        source=None,
+        first_only=False,
+        page=1,
+        limit=50,
+    ):
+        statement = select(Trade)
+        if client_request_id:
+            statement = statement.where(Trade.client_request_id == client_request_id)
+        if book_id:
+            statement = statement.where(Trade.book_id == book_id)
+        if asset_class:
+            statement = statement.where(Trade.asset_class == asset_class)
+        if status:
+            statement = statement.where(Trade.status == status)
+        if symbol:
+            statement = statement.where(Trade.symbol == symbol)
+        if source:
+            statement = statement.where(Trade.source == source)
+        if first_only:
+            result = await self.db_session.execute(statement.limit(1))
+            return result.scalars().first()
+        _page = int(page) if page is not None else 1
+        _limit = int(limit) if limit is not None else 50
+        result = await self.db_session.execute(
+            statement.order_by(Trade.created_at.desc())
+            .offset((_page - 1) * _limit)
+            .limit(_limit)
+        )
+        return result.scalars().all()
+
     def add(self, trade):
         self.db_session.add(trade)
+
+    async def lock_trade(self, trade_id):
+        """Lock the row for the rest of the transaction.
+
+        FOR NO KEY UPDATE waits if another transaction holds the row, then the
+        status and close_client_request_id checks run under that lock.
+        """
+        result = await self.db_session.execute(
+            select(Trade).where(Trade.trade_id == trade_id).with_for_update(key_share=True)
+        )
+        return result.scalars().first()
 
     # Async read: awaits AsyncSession.execute. Sync services keep get_active_trades.
     async def list_active_for_pricing(self):
@@ -116,6 +172,18 @@ class ValuationRepository:
             query = query.limit(int(limit))
         return query.all()
 
+    # Async read: awaits AsyncSession.execute. Sync callers keep get_valuations_by_trade_id.
+    async def get_valuations_by_trade_id_async(self, trade_id, limit=50):
+        statement = (
+            select(Valuation)
+            .where(Valuation.trade_id == trade_id)
+            .order_by(Valuation.valuation_time.desc())
+        )
+        if limit is not None:
+            statement = statement.limit(int(limit))
+        result = await self.db_session.execute(statement)
+        return result.scalars().all()
+
 
 class InstrumentRepository:
     def __init__(self, db_session):
@@ -127,6 +195,13 @@ class InstrumentRepository:
             .filter(Instrument.symbol == symbol)
             .first()
         )
+
+    # Async read: awaits AsyncSession.execute. Sync services keep get_by_symbol.
+    async def get_by_symbol_async(self, symbol):
+        result = await self.db_session.execute(
+            select(Instrument).where(Instrument.symbol == symbol).limit(1)
+        )
+        return result.scalars().first()
 
     def add(self, instrument):
         self.db_session.add(instrument)
@@ -377,6 +452,45 @@ class MarketDataProviderQuoteRepository:
             )
             .first()
         )
+
+    def _latest_statement(self, provider, symbol):
+        return (
+            select(MarketDataProviderQuote)
+            .where(
+                MarketDataProviderQuote.provider == provider,
+                MarketDataProviderQuote.symbol == symbol,
+            )
+            .order_by(MarketDataProviderQuote.received_at.desc())
+            .limit(1)
+        )
+
+    # Async read: awaits AsyncSession.execute. Sync services keep get_latest_freshness.
+    async def get_latest_freshness_async(self, provider, symbol):
+        """Age check. Skips `raw_payload` and the bid/ask book."""
+        statement = self._latest_statement(provider, symbol).options(
+            load_only(
+                MarketDataProviderQuote.asset_class,
+                MarketDataProviderQuote.received_at,
+                MarketDataProviderQuote.provider_timestamp,
+            )
+        )
+        result = await self.db_session.execute(statement)
+        return result.scalars().first()
+
+    # Async read: awaits AsyncSession.execute. Sync services keep get_latest_close_price.
+    async def get_latest_close_price_async(self, provider, symbol):
+        """Close pricing. Skips `raw_payload`."""
+        statement = self._latest_statement(provider, symbol).options(
+            load_only(
+                MarketDataProviderQuote.bid,
+                MarketDataProviderQuote.ask,
+                MarketDataProviderQuote.last,
+                MarketDataProviderQuote.provider_timestamp,
+                MarketDataProviderQuote.received_at,
+            )
+        )
+        result = await self.db_session.execute(statement)
+        return result.scalars().first()
 
     def get_latest_for_symbol(self, symbol, asset_class):
         return (

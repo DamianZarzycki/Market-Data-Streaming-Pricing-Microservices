@@ -3,16 +3,37 @@ import logging
 import threading
 from datetime import datetime, timezone
 
-from core.polling.config import (
-    DEFAULT_CURVE_PERSIST_BATCH_SIZE,
-    DEFAULT_CURVE_PERSIST_FLUSH_SECONDS,
-    DEFAULT_CURVE_QUEUE_MAXSIZE,
-    parse_curve_as_of_time,
-    read_positive_float_env,
-    read_positive_int_env,
-)
 from shared.trading_shared.db import AsyncDBSessionManager
+from shared.trading_shared.env import env_float, env_int
 from shared.trading_shared.models import MarketDataCurve, MarketDataSnapshot
+
+
+def parse_curve_as_of_time(as_of_time_value: object) -> datetime | None:
+    if as_of_time_value is None:
+        return None
+    if isinstance(as_of_time_value, datetime):
+        if as_of_time_value.tzinfo is None:
+            return as_of_time_value.replace(tzinfo=timezone.utc)
+        return as_of_time_value
+    if not isinstance(as_of_time_value, str) or not as_of_time_value.strip():
+        return None
+
+    timestamp_text = as_of_time_value.strip()
+    try:
+        if timestamp_text.endswith("Z"):
+            return datetime.strptime(timestamp_text, "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=timezone.utc
+            )
+        parsed_datetime = datetime.fromisoformat(timestamp_text)
+        if parsed_datetime.tzinfo is None:
+            return parsed_datetime.replace(tzinfo=timezone.utc)
+        return parsed_datetime
+    except ValueError:
+        logging.warning(
+            "Invalid curve as_of_time=%r; using current UTC time",
+            as_of_time_value,
+        )
+        return None
 
 
 class CurvePersistenceWorker:
@@ -25,26 +46,17 @@ class CurvePersistenceWorker:
         self._queue_max_size = (
             queue_max_size
             if queue_max_size is not None
-            else read_positive_int_env(
-                "MARKET_DATA_CURVE_QUEUE_MAXSIZE",
-                DEFAULT_CURVE_QUEUE_MAXSIZE,
-            )
+            else env_int("MARKET_DATA_CURVE_QUEUE_MAXSIZE", 1000)
         )
         self._persist_batch_size = (
             persist_batch_size
             if persist_batch_size is not None
-            else read_positive_int_env(
-                "MARKET_DATA_CURVE_PERSIST_BATCH_SIZE",
-                DEFAULT_CURVE_PERSIST_BATCH_SIZE,
-            )
+            else env_int("MARKET_DATA_CURVE_PERSIST_BATCH_SIZE", 20)
         )
         self._flush_interval_seconds = (
             flush_interval_seconds
             if flush_interval_seconds is not None
-            else read_positive_float_env(
-                "MARKET_DATA_CURVE_PERSIST_FLUSH_SECONDS",
-                DEFAULT_CURVE_PERSIST_FLUSH_SECONDS,
-            )
+            else env_float("MARKET_DATA_CURVE_PERSIST_FLUSH_SECONDS", 2.0, minimum=0.1)
         )
         self._persist_queue: asyncio.Queue = asyncio.Queue(maxsize=self._queue_max_size)
         self._metrics_lock = threading.Lock()

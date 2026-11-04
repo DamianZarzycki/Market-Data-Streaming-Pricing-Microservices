@@ -2,9 +2,11 @@ import asyncio
 import logging
 from typing import TypedDict
 
+from shared.trading_shared.env import env_int
+
 from .config import generator_config
 
-_JOIN_TIMEOUT_S = 25
+_JOIN_TIMEOUT_S = env_int("TRADE_GENERATION_JOIN_TIMEOUT_SECONDS", 25)
 
 
 class GeneratorState(TypedDict):

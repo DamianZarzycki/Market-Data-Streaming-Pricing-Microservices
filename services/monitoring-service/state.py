@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from shared.trading_shared.enums import ServiceStatus
+from shared.trading_shared.env import env_int
 
 from models import (
     ActivitySnapshot,
@@ -14,9 +15,9 @@ from models import (
 )
 
 # A lap is at most the 2s client timeout plus the 1s sleep. 10s is about three missed laps.
-PROBE_TTL_SECONDS = 10
+PROBE_TTL_SECONDS = env_int("MONITORING_PROBE_TTL_SECONDS", 10)
 # History for errors_5m. This is not the liveness of a probe reading.
-ERROR_WINDOW_SECONDS = 300
+ERROR_WINDOW_SECONDS = env_int("MONITORING_ERROR_WINDOW_SECONDS", 300)
 DATA_WINDOW_LABEL = "last 5 min"
 
 SHORT_LABELS = {

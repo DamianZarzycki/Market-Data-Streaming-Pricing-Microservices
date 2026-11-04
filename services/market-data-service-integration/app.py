@@ -5,15 +5,13 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI
 
-from api.errors import install_error_handlers
-from core import http as http_client
-from core import state
-from core.audit_worker import audit_worker
+from shared.trading_shared.http_errors import install_error_handlers
+from core import runtime
+from core.audit import audit_worker
 from core.curve_service import CurveService
-from core.polling.orchestrator import PollWorkers
-from core.quote_service import QuoteService
-from core.request_tracker import RequestTracker
-from core.worker import db_queue, db_worker
+from core.polling.quote_persistence import db_queue, db_worker
+from core.polling.workers import PollWorkers
+from core.quotes import QuoteService, RequestTracker
 from providers.limits.market_data_providers_limits import load_providers_limits
 from routes import register_routes
 from shared.trading_shared.audit import AuditLogger
@@ -28,17 +26,17 @@ audit_logger = AuditLogger("market-data-service-integration")
 
 # Async: awaits the quote poll loop, which awaits provider fetches and asyncio.sleep.
 async def quote_poll_worker() -> None:
-    await state.get_poll_workers().quote_loop()
+    await runtime.get_poll_workers().quote_loop()
 
 
 # Async: awaits the curve poll loop, which awaits provider fetches and asyncio.sleep.
 async def curve_poll_worker() -> None:
-    await state.get_poll_workers().curve_loop()
+    await runtime.get_poll_workers().curve_loop()
 
 
 # Async: awaits the curve persistence queue, then AsyncSession.commit.
 async def curve_db_worker() -> None:
-    await state.get_poll_workers().persist_loop()
+    await runtime.get_poll_workers().persist_loop()
 
 
 def _worker_table():
@@ -58,7 +56,7 @@ def _worker_table():
 
 # Async: awaits provider-limit load and request-tracker hydration.
 async def startup() -> None:
-    http_client.open_http()
+    runtime.open_http()
     limits = await load_providers_limits()
     if not limits:
         logging.warning(
@@ -67,9 +65,9 @@ async def startup() -> None:
     else:
         logging.info("Loaded provider limits from DB: %s", limits)
     tracker = await RequestTracker.from_db(limits)
-    state.quote_service = QuoteService.create(tracker, db_queue)
-    state.curve_service = CurveService.create()
-    state.poll_workers = PollWorkers(state.quote_service, state.curve_service)
+    runtime.quote_service = QuoteService.create(tracker, db_queue)
+    runtime.curve_service = CurveService.create()
+    runtime.poll_workers = PollWorkers(runtime.quote_service, runtime.curve_service)
 
 
 # Async: awaits startup, audit inserts, worker cancellation, AsyncClient.aclose, and engine dispose.
@@ -123,7 +121,7 @@ async def lifespan(app: FastAPI):
                 entity_type="Service",
                 correlation_id="",
             )
-        await http_client.close_http()
+        await runtime.close_http()
         await dispose_async_engine()
 
 

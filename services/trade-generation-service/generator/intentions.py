@@ -6,12 +6,12 @@ import uuid
 
 from sqlalchemy import func, select
 
-from api.errors import ApiError
+from shared.trading_shared.http_errors import ApiError
+from shared.trading_shared.db import AsyncDBSessionManager
 from shared.trading_shared.enums import ActionType, AssetClass, TradeSide, TradeSource, TradeStatus
 from shared.trading_shared.models import Trade
 
 from .config import generator_config
-from .db import session_scope
 from .http import (
     _BOOKS_URL,
     _INTEGRATION_SNAPSHOT_URL,
@@ -205,8 +205,8 @@ async def _select_closes(limit, source):
     if source:
         statement = statement.where(Trade.source == source)
     statement = statement.order_by(func.random()).limit(limit)
-    async with session_scope() as session:
-        result = await session.execute(statement)
+    async with AsyncDBSessionManager() as db:
+        result = await db.session.execute(statement)
         selected = [
             (row.trade_id, row.trade_price, row.symbol) for row in result.all()
         ]

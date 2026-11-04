@@ -1,10 +1,12 @@
 import threading
 
+from shared.trading_shared.env import env_int
+
 valuation_cache = {}
 cache_lock = threading.Lock()
 
 # Keep only recent live ticks per trade so SSE flood cannot grow memory unboundedly.
-MAX_VALUATIONS_PER_TRADE = 20
+MAX_VALUATIONS_PER_TRADE = env_int("BLOTTER_MAX_VALUATIONS_PER_TRADE", 20)
 
 
 def _as_float(value):

@@ -1,12 +1,9 @@
-import asyncio
-import logging
-
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
 
 from shared.trading_shared.audit import AuditLogger
 from shared.trading_shared.enums import EntityType, EventType
+from shared.trading_shared.http_errors import ApiError, install_error_handlers as install_shared_error_handlers
 
 audit_logger = AuditLogger("books-service")
 
@@ -14,13 +11,6 @@ _REQUIRED_FIELDS = {"name", "expected_asset_class"}
 _MISSING_FIELDS = "Missing required fields (name, expected_asset_class)"
 _INVALID_JSON = "Invalid JSON payload"
 _INVALID_BOOK_ID = "Invalid book id"
-
-
-class ApiError(Exception):
-    def __init__(self, status_code: int, message: str):
-        self.status_code = status_code
-        self.message = message
-        super().__init__(message)
 
 
 def _is_json_invalid(errors) -> bool:
@@ -77,10 +67,10 @@ def _name_from_body(body):
     return None
 
 
-def _record_reject(message: str, body) -> None:
+async def _record_reject(message: str, body) -> None:
     # The book row was never staged, so this reject has no request transaction
-    # to join. AuditLogger commits it on its own session.
-    audit_logger.warning(
+    # to join. AuditLogger commits it on its own async session.
+    await audit_logger.awarning(
         EventType.DB_REJECT,
         message,
         entity_type=EntityType.BOOK.value,
@@ -98,35 +88,29 @@ def _db_error_message(request: Request) -> str:
     return "Failed to write book"
 
 
+async def _classify(_request: Request, exc: RequestValidationError):
+    status_code, message, audit_reject = classify_validation(exc)
+    if audit_reject:
+        await _record_reject(message, exc.body)
+    return status_code, message
+
+
+async def _on_unexpected(request: Request, exc: Exception) -> None:
+    if request.method not in {"POST", "PUT", "DELETE"}:
+        return
+    entity_id = request.path_params.get("book_id", "")
+    await audit_logger.aerror(
+        EventType.DB_ERROR,
+        _db_error_message(request),
+        entity_type=EntityType.BOOK.value,
+        entity_id=str(entity_id) if entity_id else "",
+        payload={"error_type": type(exc).__name__},
+    )
+
+
 def install_error_handlers(app: FastAPI) -> None:
-    @app.exception_handler(ApiError)
-    async def api_error(_request: Request, exc: ApiError):
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={"error": exc.message},
-        )
-
-    @app.exception_handler(RequestValidationError)
-    async def validation_error(_request: Request, exc: RequestValidationError):
-        status_code, message, audit_reject = classify_validation(exc)
-        if audit_reject:
-            await asyncio.to_thread(_record_reject, message, exc.body)
-        return JSONResponse(status_code=status_code, content={"error": message})
-
-    @app.exception_handler(Exception)
-    async def unexpected(request: Request, exc: Exception):
-        logging.exception("Error handling %s %s", request.method, request.url.path)
-        if request.method in {"POST", "PUT", "DELETE"}:
-            entity_id = request.path_params.get("book_id", "")
-            await asyncio.to_thread(
-                audit_logger.error,
-                EventType.DB_ERROR,
-                _db_error_message(request),
-                entity_type=EntityType.BOOK.value,
-                entity_id=str(entity_id) if entity_id else "",
-                payload={"error_type": type(exc).__name__},
-            )
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": "Internal server error"},
-        )
+    install_shared_error_handlers(
+        app,
+        classify=_classify,
+        on_unexpected=_on_unexpected,
+    )

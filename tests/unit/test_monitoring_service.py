@@ -112,7 +112,7 @@ def test_lifespan_starts_worker_and_health_does_not_probe():
     entered, stand_in = _hold_worker()
     state.reset()
 
-    with patch("app.worker.monitoring_worker", stand_in), patch("app.AuditLogger.info"):
+    with patch.object(app.worker, "monitoring_worker", stand_in), patch.object(app.AuditLogger, "info"):
         with TestClient(app.app) as client:
             assert entered.wait(timeout=2)
             health = client.get("/health")
@@ -142,7 +142,7 @@ def test_expired_probe_is_absent_from_status_and_cache():
         expires_at=now + PROBE_TTL_SECONDS,
     )
 
-    with patch("app.worker.monitoring_worker", stand_in), patch("app.AuditLogger.info"):
+    with patch.object(app.worker, "monitoring_worker", stand_in), patch.object(app.AuditLogger, "info"):
         with TestClient(app.app) as client:
             assert entered.wait(timeout=2)
             body = client.get("/status").json()
@@ -191,7 +191,7 @@ def test_probe_lap_starts_every_target_before_any_returns():
         return _probe(ServiceStatus.UP.value)
 
     async def scenario():
-        with patch("worker.check_service_health", fake_check):
+        with patch.object(worker, "check_service_health", fake_check):
             task = asyncio.create_task(worker.probe_once(None))
             await asyncio.wait_for(release.wait(), timeout=1)
             assert entered == [name for name, _url in worker.PROBE_TARGETS]

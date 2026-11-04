@@ -1,4 +1,6 @@
-import os
+import logging
+
+from shared.trading_shared.env import env_optional
 
 
 _DEFAULT_CONFIG = {
@@ -14,26 +16,6 @@ _DEFAULT_CONFIG = {
 }
 
 CONFIG_KEYS = frozenset(_DEFAULT_CONFIG.keys())
-
-_ENV_BY_KEY = {
-    "interval_ms": "TRADE_GENERATION_INTERVAL_MS",
-    "batch_size": "TRADE_GENERATION_BATCH_SIZE",
-    "open_weight_pct": "TRADE_GENERATION_OPEN_WEIGHT_PCT",
-    "close_weight_pct": "TRADE_GENERATION_CLOSE_WEIGHT_PCT",
-    "qty_min": "TRADE_GENERATION_QTY_MIN",
-    "qty_max": "TRADE_GENERATION_QTY_MAX",
-    "price_min": "TRADE_GENERATION_PRICE_MIN",
-    "price_max": "TRADE_GENERATION_PRICE_MAX",
-    "use_provider_data": "USE_PROVIDER_DATA",
-}
-
-
-def _env_raw(name):
-    value = os.getenv(name)
-    if value is None:
-        return None
-    stripped = value.strip()
-    return stripped if stripped else None
 
 
 def _as_int(value, field):
@@ -168,19 +150,36 @@ def _apply_config_patch(base, payload):
 
 
 def _config_from_env():
+    """Copy only the variables that are actually set.
+
+    An unset close weight still follows the open weight inside
+    `_patch_open_close_weights`. A bad value falls back to the defaults
+    instead of stopping the process.
+    """
     payload = {}
-    for key, env_name in _ENV_BY_KEY.items():
-        raw = _env_raw(env_name)
+    interval = env_optional("TRADE_GENERATION_INTERVAL_MS")
+    if interval is None:
+        interval = env_optional("TICK_INTERVAL_MS")
+    if interval is not None:
+        payload["interval_ms"] = interval
+    for key, name in (
+        ("batch_size", "TRADE_GENERATION_BATCH_SIZE"),
+        ("open_weight_pct", "TRADE_GENERATION_OPEN_WEIGHT_PCT"),
+        ("close_weight_pct", "TRADE_GENERATION_CLOSE_WEIGHT_PCT"),
+        ("qty_min", "TRADE_GENERATION_QTY_MIN"),
+        ("qty_max", "TRADE_GENERATION_QTY_MAX"),
+        ("price_min", "TRADE_GENERATION_PRICE_MIN"),
+        ("price_max", "TRADE_GENERATION_PRICE_MAX"),
+        ("use_provider_data", "USE_PROVIDER_DATA"),
+    ):
+        raw = env_optional(name)
         if raw is not None:
             payload[key] = raw
-    if "interval_ms" not in payload:
-        tick = _env_raw("TICK_INTERVAL_MS")
-        if tick is not None:
-            payload["interval_ms"] = tick
     try:
         return _apply_config_patch(_DEFAULT_CONFIG, payload)
     except ValueError as exc:
-        raise ValueError(f"Invalid TRADE_GENERATION_* env: {exc}") from exc
+        logging.warning("Invalid TRADE_GENERATION_* env (%s); using defaults", exc)
+        return dict(_DEFAULT_CONFIG)
 
 
 generator_config = _config_from_env()

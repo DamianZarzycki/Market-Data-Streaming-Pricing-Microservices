@@ -1,7 +1,7 @@
 from fastapi import FastAPI, status
 
 from api.schemas import HealthResponse
-from core.fetch_audit import health_view
+from core.audit import health_view
 
 
 def register(app: FastAPI) -> None:

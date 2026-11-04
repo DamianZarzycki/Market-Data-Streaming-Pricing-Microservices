@@ -1,7 +1,7 @@
 import logging
 
 import metrics
-from db.async_session import AsyncDBSessionManager
+from shared.trading_shared.db import AsyncDBSessionManager
 from processing.close_trade import ClosedTrade, close_trade
 from processing.open_trade import OpenedTrade, open_trade
 from shared.trading_shared.audit import append_audit

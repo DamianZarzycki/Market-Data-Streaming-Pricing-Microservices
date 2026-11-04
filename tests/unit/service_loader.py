@@ -34,7 +34,6 @@ _COLLIDING = (
     "metrics",
     "actions",
     "processing",
-    "db",
 )
 
 

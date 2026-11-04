@@ -2,9 +2,8 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Path, Query, Response, status
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.dependencies import get_db
 from api.errors import TRADE_NOT_FOUND, ApiError
 from api.schemas import (
     TradeDetailResponse,
@@ -12,25 +11,25 @@ from api.schemas import (
     TradeListResponse,
     ValuationListResponse,
 )
+from shared.trading_shared.db import get_async_db
 import trades_service
 
 
 def register(app: FastAPI) -> None:
-    # Sync handler: SQLAlchemy's Session blocks, so this route stays a plain def
-    # and runs on the server threadpool.
+    # Async handler: awaits the trade SELECT on AsyncSession.
     @app.get(
         "/trades",
         response_model=TradeListResponse,
         response_model_exclude_unset=True,
         status_code=status.HTTP_200_OK,
     )
-    def list_trades(
+    async def list_trades(
         query: Annotated[TradeListQuery, Query()],
-        db: Session = Depends(get_db),
+        db: AsyncSession = Depends(get_async_db),
     ) -> TradeListResponse:
         return TradeListResponse.model_validate(
             {
-                "trades": trades_service.fetch_trades(
+                "trades": await trades_service.fetch_trades(
                     db,
                     book_id=query.book_id,
                     asset_class=query.asset_class,
@@ -43,38 +42,37 @@ def register(app: FastAPI) -> None:
             }
         )
 
-    # Sync handler: SQLAlchemy's Session blocks, so this route stays a plain def
-    # and runs on the server threadpool.
+    # Async handler: awaits the trade and valuation SELECTs on AsyncSession.
     @app.get(
         "/trades/{trade_id}",
         response_model=TradeDetailResponse,
         response_model_exclude_unset=True,
         status_code=status.HTTP_200_OK,
     )
-    def trade_by_id(
+    async def trade_by_id(
         trade_id: Annotated[UUID, Path()],
-        db: Session = Depends(get_db),
+        db: AsyncSession = Depends(get_async_db),
     ) -> TradeDetailResponse:
-        result = trades_service.fetch_trade_by_id(db, str(trade_id))
+        result = await trades_service.fetch_trade_by_id(db, str(trade_id))
         if result is None:
             raise ApiError(status.HTTP_404_NOT_FOUND, TRADE_NOT_FOUND)
         return TradeDetailResponse.model_validate(result)
 
-    # Sync handler: SQLAlchemy's Session blocks, so this route stays a plain def
-    # and runs on the server threadpool. A missing trade is an empty list.
+    # Async handler: awaits the valuation SELECT on AsyncSession.
+    # A missing trade is an empty list.
     @app.get(
         "/trades/{trade_id}/valuations",
         response_model=ValuationListResponse,
         response_model_exclude_unset=True,
         status_code=status.HTTP_200_OK,
     )
-    def trade_valuations(
+    async def trade_valuations(
         trade_id: Annotated[UUID, Path()],
-        db: Session = Depends(get_db),
+        db: AsyncSession = Depends(get_async_db),
     ) -> ValuationListResponse:
         return ValuationListResponse.model_validate(
             {
-                "valuations": trades_service.fetch_trade_valuations(db, str(trade_id)),
+                "valuations": await trades_service.fetch_trade_valuations(db, str(trade_id)),
             }
         )
 

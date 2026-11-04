@@ -2,8 +2,8 @@ import logging
 
 import httpx
 
-from api.errors import ApiError
-from shared.trading_shared.env import env
+from shared.trading_shared.http_errors import ApiError
+from shared.trading_shared.env import env, env_float, env_int
 
 from .config import get_config
 from .lifecycle import pause_for_retry, record_send_failure
@@ -24,10 +24,28 @@ _PROVIDER_MODE_URL = f"{_TRADE_ACTION_URL}/provider-mode"
 _UNREACHABLE = "Failed to reach trade-action-service"
 
 
+_HTTP_TIMEOUT_SECONDS = env_float("TRADE_GENERATION_HTTP_TIMEOUT_SECONDS", 5.0, minimum=0.1)
+_HTTP_CONNECT_TIMEOUT_SECONDS = env_float(
+    "TRADE_GENERATION_HTTP_CONNECT_TIMEOUT_SECONDS",
+    2.0,
+    minimum=0.1,
+)
+_FETCH_TIMEOUT_SECONDS = env_float("TRADE_GENERATION_FETCH_TIMEOUT_SECONDS", 2.0, minimum=0.1)
+_PROVIDER_MODE_TIMEOUT_SECONDS = env_float(
+    "TRADE_GENERATION_PROVIDER_MODE_TIMEOUT_SECONDS",
+    5.0,
+    minimum=0.1,
+)
+_HTTP_MAX_CONNECTIONS = env_int("TRADE_GENERATION_HTTP_MAX_CONNECTIONS", 10)
+
+
 def _build_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(
-        timeout=httpx.Timeout(5.0, connect=2.0),
-        limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+        timeout=httpx.Timeout(_HTTP_TIMEOUT_SECONDS, connect=_HTTP_CONNECT_TIMEOUT_SECONDS),
+        limits=httpx.Limits(
+            max_connections=_HTTP_MAX_CONNECTIONS,
+            max_keepalive_connections=min(5, _HTTP_MAX_CONNECTIONS),
+        ),
     )
 
 
@@ -52,9 +70,12 @@ def _client() -> httpx.AsyncClient:
     return _CLIENT
 
 
-async def fetch_json_once(url, timeout=2.0):
+async def fetch_json_once(url, timeout=None):
     """One-shot HTTP JSON fetch. No retry — the generator already loops."""
-    response = await _client().get(url, timeout=timeout)
+    response = await _client().get(
+        url,
+        timeout=_FETCH_TIMEOUT_SECONDS if timeout is None else timeout,
+    )
     try:
         response.raise_for_status()
         return response.json()
@@ -177,7 +198,7 @@ async def set_trade_action_provider_mode(enabled):
         response = await _client().put(
             _PROVIDER_MODE_URL,
             json={"use_provider_data": bool(enabled)},
-            timeout=5.0,
+            timeout=_PROVIDER_MODE_TIMEOUT_SECONDS,
         )
     except httpx.TransportError as exc:
         logging.exception("Failed to set trade-action provider mode")

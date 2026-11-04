@@ -4,9 +4,9 @@ from datetime import datetime, timezone
 import httpx2
 from fastapi import status
 
-from api.errors import ApiError
-from core.fetch_audit import CURVE_SERVICE, record_error, record_query, record_success
-from core.polling.config import read_symbol_map
+from shared.trading_shared.http_errors import ApiError
+from core.audit import CURVE_SERVICE, record_error, record_query, record_success
+from core.polling import read_symbol_map
 from providers.curve_providers.ecb_provider import EcbProvider
 from providers.curve_providers.fred_provider import FredProvider
 from providers.curve_providers.nbp_provider import NbpProvider

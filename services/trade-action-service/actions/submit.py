@@ -18,11 +18,12 @@ from api.schemas import (
     OpenTradeAction,
     parse_action,
 )
-from db.async_session import AsyncDBSessionManager
+from shared.trading_shared.db import AsyncDBSessionManager
 from shared.trading_shared.audit import append_audit
 from shared.trading_shared.enums import ActionType, EventType, Severity
+from shared.trading_shared.env import env_int
 
-MAX_BATCH_SIZE = 100
+MAX_BATCH_SIZE = env_int("TRADE_ACTION_MAX_BATCH_SIZE", 100)
 _SERVICE_NAME = "trade-action-service"
 _NOT_AN_OBJECT = "payload must be an object"
 _OVERLOADED = "System overloaded, please try again later"

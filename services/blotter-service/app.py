@@ -1,6 +1,8 @@
 from fastapi import FastAPI
 from shared.trading_shared.audit import AuditLogger
+from shared.trading_shared.db import dispose_async_engine
 from shared.trading_shared.enums import EventType
+from shared.trading_shared.env import env_int
 from shared.trading_shared.logging_config import configure_logging
 from contextlib import asynccontextmanager
 from api.errors import install_error_handlers
@@ -9,6 +11,7 @@ from routes import register_routes
 import asyncio
 import logging
 import threading
+import trades_service
 import worker
 import uvicorn
 
@@ -16,19 +19,19 @@ import uvicorn
 
 configure_logging("blotter-service")
 
-_JOIN_TIMEOUT_SECONDS = 5
+_JOIN_TIMEOUT_SECONDS = env_int("BLOTTER_JOIN_TIMEOUT_SECONDS", 5)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     audit_logger = AuditLogger("blotter-service")
-    await asyncio.to_thread(
-        audit_logger.info,
+    await audit_logger.ainfo(
         EventType.WORKER_STARTED,
         "Valuation worker thread started",
         entity_type="Service",
         correlation_id="",
     )
+    trades_service.open_http()
     worker.stop_event.clear()
     thread = threading.Thread(
         target=worker.valuation_worker,
@@ -42,13 +45,14 @@ async def lifespan(app: FastAPI):
         worker.stop_event.set()
         worker.close_stream()
         await asyncio.to_thread(thread.join, _JOIN_TIMEOUT_SECONDS)
-        await asyncio.to_thread(
-            audit_logger.info,
+        await trades_service.close_http()
+        await audit_logger.ainfo(
             EventType.WORKER_STOPPED,
             "Valuation worker thread stopped",
             entity_type="Service",
             correlation_id="",
         )
+        await dispose_async_engine()
 
 
 app = FastAPI(lifespan=lifespan)

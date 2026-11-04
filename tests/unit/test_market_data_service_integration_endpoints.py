@@ -13,12 +13,12 @@ from service_loader import load_service, silence_audit
 @contextmanager
 def _client() -> Iterator[tuple[TestClient, Any]]:
     app_module = load_service("market-data-service-integration")
-    state = cast(Any, sys.modules["core.state"])
-    worker_mod = cast(Any, sys.modules["core.worker"])
-    quote_mod = cast(Any, sys.modules["core.quote_service"])
+    state = cast(Any, sys.modules["core.runtime"])
+    worker_mod = cast(Any, sys.modules["core.polling.quote_persistence"])
+    quote_mod = cast(Any, sys.modules["core.quotes"])
     curve_mod = cast(Any, sys.modules["core.curve_service"])
-    poll_mod = cast(Any, sys.modules["core.polling.orchestrator"])
-    tracker_mod = cast(Any, sys.modules["core.request_tracker"])
+    poll_mod = cast(Any, sys.modules["core.polling.workers"])
+    tracker_mod = quote_mod
 
     async def _idle():
         await asyncio.Event().wait()
@@ -84,7 +84,7 @@ def test_quotes_requires_a_symbol():
 
 def test_quotes_reads_through_the_async_session(monkeypatch):
     with _client() as (client, _state):
-        quote_mod = cast(Any, sys.modules["core.quote_service"])
+        quote_mod = cast(Any, sys.modules["core.quotes"])
         seen = {}
 
         class _Quotes:
@@ -120,8 +120,8 @@ def test_quotes_reads_through_the_async_session(monkeypatch):
 
 def test_provider_health_uses_the_async_client(monkeypatch):
     with _client() as (client, state):
-        http_mod = cast(Any, sys.modules["core.http"])
-        tracker_mod = cast(Any, sys.modules["core.request_tracker"])
+        http_mod = cast(Any, sys.modules["core.runtime"])
+        tracker_mod = cast(Any, sys.modules["core.quotes"])
 
         def handler(request: httpx2.Request) -> httpx2.Response:
             host = request.url.host
@@ -174,7 +174,7 @@ def test_provider_health_uses_the_async_client(monkeypatch):
 def test_stream_yields_one_frame_from_the_subscriber_queue(monkeypatch):
     monkeypatch.setenv("MARKET_DATA_MOCK_STREAM", "false")
     with _client() as (client, _state):
-        stream_hub = cast(Any, sys.modules["core.stream_hub"])
+        stream_hub = cast(Any, sys.modules["core.stream"])
         message = 'event: quote\ndata: {"symbol": "AAPL"}\n\n'
 
         class ScriptedQueue(asyncio.Queue):

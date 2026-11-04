@@ -7,10 +7,11 @@ from fastapi import FastAPI
 
 from shared.trading_shared.audit import AuditLogger
 from shared.trading_shared.audit_retention import start_retention, stop_retention
+from shared.trading_shared.db import dispose_async_engine
 from shared.trading_shared.enums import EventType
+from shared.trading_shared.http_errors import MaxBodySizeMiddleware
 from shared.trading_shared.logging_config import configure_logging
 
-from api.body_limit import MaxBodySizeMiddleware
 from api.errors import install_error_handlers
 from routes import register_routes
 
@@ -20,8 +21,7 @@ configure_logging("books-service")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     audit_logger = AuditLogger("books-service")
-    await asyncio.to_thread(
-        audit_logger.info,
+    await audit_logger.ainfo(
         EventType.WORKER_STARTED,
         "Books service started",
         entity_type="Service",
@@ -31,12 +31,12 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         await asyncio.to_thread(stop_retention)
-        await asyncio.to_thread(
-            audit_logger.info,
+        await audit_logger.ainfo(
             EventType.WORKER_STOPPED,
             "Books service stopped",
             entity_type="Service",
         )
+        await dispose_async_engine()
 
 
 app = FastAPI(lifespan=lifespan)

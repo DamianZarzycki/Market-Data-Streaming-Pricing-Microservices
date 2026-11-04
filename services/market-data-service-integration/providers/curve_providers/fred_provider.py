@@ -1,9 +1,9 @@
 import asyncio
 import logging
-import os
 
 from providers.curve_providers._base import CurveProviderBase
 from shared.trading_shared.enums import CurveType
+from shared.trading_shared.env import env_str
 
 FRED_SERIES = (
     ("DGS1MO", "1M"),
@@ -25,7 +25,7 @@ class FredProvider(CurveProviderBase):
 
     def __init__(self):
         super().__init__(self.key)
-        self.api_key = os.getenv("FRED_API_KEY") or ""
+        self.api_key = env_str("FRED_API_KEY", "")
 
     # Async: awaits AsyncClient.get for this series.
     async def _observation(self, series_id: str, tenor: str):

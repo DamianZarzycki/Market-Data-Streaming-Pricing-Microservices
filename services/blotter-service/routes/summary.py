@@ -1,7 +1,7 @@
 import logging
 
 from fastapi import Depends, FastAPI, status
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.dependencies import get_summary_db
 from api.errors import SUMMARY_FAILED, ApiError
@@ -10,21 +10,21 @@ import trades_service
 
 
 def register(app: FastAPI) -> None:
-    # Sync handler: the books-service call and the SQLAlchemy session both block,
-    # so this route stays a plain def and runs on the server threadpool.
+    # Async handler: awaits the books-service GET, then the active-trade
+    # counts on AsyncSession. The catalogue call finishes before the session opens.
     @app.get(
         "/books/summary",
         response_model=BookSummaryResponse,
         response_model_exclude_unset=True,
         status_code=status.HTTP_200_OK,
     )
-    def book_summary(
-        bundle: tuple[dict, Session] = Depends(get_summary_db),
+    async def book_summary(
+        bundle: tuple[dict, AsyncSession] = Depends(get_summary_db),
     ) -> BookSummaryResponse:
         payload, db = bundle
         try:
             return BookSummaryResponse.model_validate(
-                trades_service.build_book_summary(payload, db)
+                await trades_service.build_book_summary(payload, db)
             )
         except Exception:
             logging.exception("Failed to fetch book summary")

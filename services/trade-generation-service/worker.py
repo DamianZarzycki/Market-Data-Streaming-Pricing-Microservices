@@ -1,9 +1,9 @@
 import asyncio
 import logging
 
-from api.errors import ApiError
+from shared.trading_shared.http_errors import ApiError
 from generator.config import get_config
-from generator.db import session_scope
+from shared.trading_shared.db import AsyncDBSessionManager
 from generator.intentions import generate_and_send_to_trade_action_service
 from generator.lifecycle import (
     generation_lock,
@@ -12,29 +12,30 @@ from generator.lifecycle import (
     record_send_failure,
     stop_event,
 )
+from shared.trading_shared.env import env_int
 from shared.trading_shared.audit import append_audit
 from shared.trading_shared.enums import EventType, Severity
 
 # One OPEN or CLOSE at a time, slow enough to watch against live provider quotes.
-PROVIDER_LOOP_INTERVAL_MS = 15_000
+PROVIDER_LOOP_INTERVAL_MS = env_int("TRADE_GENERATION_PROVIDER_LOOP_INTERVAL_MS", 15_000)
 _SERVICE_NAME = "trade-generation-service"
 
 async def _audit(event_type, message) -> None:
     """Write one worker lifecycle row on the async session.
 
-    `append_audit` only stages the row. The commit is awaited, so this does
-    not open the shared sync session.
+    `append_audit` only stages the row. The commit is awaited on the shared
+    async session.
     """
     try:
-        async with session_scope() as session:
+        async with AsyncDBSessionManager() as db:
             append_audit(
-                session,
+                db.session,
                 event_type,
                 message,
                 service_name=_SERVICE_NAME,
                 severity=Severity.INFO,
             )
-            await session.commit()
+            await db.commit()
     except Exception:
         logging.exception("Failed to persist audit log")
 

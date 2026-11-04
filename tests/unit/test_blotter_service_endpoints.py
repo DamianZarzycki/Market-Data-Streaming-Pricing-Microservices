@@ -1,7 +1,8 @@
+import asyncio
 import sys
 import threading
 from contextlib import contextmanager
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -26,7 +27,19 @@ def _client():
         worker_mod.stop_event.wait()
 
     worker_mod.valuation_worker = _wait
-    with patch.object(app_module.AuditLogger, "info", lambda *args, **kwargs: None):
+
+    def _session():
+        db = AsyncMock()
+        db.in_transaction = MagicMock(return_value=True)
+        return db
+
+    with (
+        patch.object(app_module.AuditLogger, "ainfo", new_callable=AsyncMock),
+        patch(
+            "shared.trading_shared.db._async_session_factory",
+            return_value=_session,
+        ),
+    ):
         with TestClient(app_module.app, raise_server_exceptions=False) as client:
             assert started.wait(2)
             yield client, trades, cache, worker_mod
@@ -49,10 +62,14 @@ def test_health_reads_the_in_memory_cache():
 
 def test_book_summary_returns_payload_or_500():
     with _client() as (client, trades, _, _):
-        trades.fetch_books_payload = lambda: {
-            "books": [{"book_id": "b1", "name": "Equity"}]
-        }
-        trades._active_counts = lambda session: {}
+        async def fetch_books_payload():
+            return {"books": [{"book_id": "b1", "name": "Equity"}]}
+
+        async def active_counts(session):
+            return {}
+
+        trades.fetch_books_payload = fetch_books_payload
+        trades._active_counts = active_counts
 
         response = client.get("/books/summary")
 
@@ -69,7 +86,7 @@ def test_book_summary_returns_payload_or_500():
             ]
         }
 
-        def explode():
+        async def explode():
             raise RuntimeError("books-service down")
 
         trades.fetch_books_payload = explode
@@ -81,11 +98,13 @@ def test_book_summary_returns_payload_or_500():
 
 def test_book_summary_turns_an_aggregation_error_into_500():
     with _client() as (client, trades, _, _):
-        trades.fetch_books_payload = lambda: {"books": []}
+        async def fetch_books_payload():
+            return {"books": []}
 
-        def explode(payload, session):
+        async def explode(payload, session):
             raise RuntimeError("db down")
 
+        trades.fetch_books_payload = fetch_books_payload
         trades.build_book_summary = explode
         response = client.get("/books/summary")
 
@@ -96,7 +115,7 @@ def test_book_summary_turns_an_aggregation_error_into_500():
 def test_trades_forwards_query_filters():
     captured = {}
 
-    def fetch_trades(session, **filters):
+    async def fetch_trades(session, **filters):
         captured.update(filters)
         return [{"trade_id": "t1", "valuation": None}]
 
@@ -131,7 +150,7 @@ def test_trades_forwards_query_filters():
 def test_trades_without_query_uses_defaults():
     captured = {}
 
-    def fetch_trades(session, **filters):
+    async def fetch_trades(session, **filters):
         captured.update(filters)
         return []
 
@@ -150,7 +169,7 @@ def test_trades_without_query_uses_defaults():
 def test_first_only_false_stays_false_and_the_body_is_a_list():
     captured = {}
 
-    def fetch_trades(session, **filters):
+    async def fetch_trades(session, **filters):
         captured.update(filters)
         return []
 
@@ -172,14 +191,14 @@ def test_fetch_trades_wraps_one_row_in_a_list(monkeypatch):
         def __init__(self, session):
             pass
 
-        def get_trades(self, **kwargs):
+        async def get_trades_async(self, **kwargs):
             seen.update(kwargs)
             return object()
 
     monkeypatch.setattr(trades, "TradeRepository", Repo)
     monkeypatch.setattr(trades, "serialize", lambda row: {"trade_id": "t1"})
 
-    result = trades.fetch_trades(
+    result = asyncio.run(trades.fetch_trades(
         None,
         book_id=None,
         asset_class=None,
@@ -188,7 +207,7 @@ def test_fetch_trades_wraps_one_row_in_a_list(monkeypatch):
         first_only=True,
         page=1,
         limit=50,
-    )
+    ))
 
     assert seen["first_only"] is True
     assert result == [{"trade_id": "t1", "valuation": None}]
@@ -203,7 +222,7 @@ def test_invalid_page_or_limit_is_400_json():
 
 
 def test_trade_by_id_found_missing_and_not_a_uuid():
-    def fetch_trade_by_id(session, trade_id):
+    async def fetch_trade_by_id(session, trade_id):
         if trade_id == TRADE_ID:
             return {
                 "trade": {"trade_id": trade_id},
@@ -231,9 +250,10 @@ def test_trade_by_id_found_missing_and_not_a_uuid():
 
 def test_trade_valuations_wraps_the_list():
     with _client() as (client, trades, _, _):
-        trades.fetch_trade_valuations = lambda session, trade_id: [
-            {"trade_id": trade_id, "fair_value": 1}
-        ]
+        async def fetch_trade_valuations(session, trade_id):
+            return [{"trade_id": trade_id, "fair_value": 1}]
+
+        trades.fetch_trade_valuations = fetch_trade_valuations
         response = client.get("/trades/" + TRADE_ID + "/valuations")
 
     assert response.status_code == 200

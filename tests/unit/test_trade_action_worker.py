@@ -44,7 +44,7 @@ def _instrument(**overrides):
 
 def _open_db(instrument, inserted):
     db = MagicMock()
-    db.instruments.get_by_symbol = AsyncMock(return_value=instrument)
+    db.instruments.get_by_symbol_async = AsyncMock(return_value=instrument)
     db.instruments.add = MagicMock()
     result = MagicMock()
     result.first.return_value = inserted
@@ -78,10 +78,10 @@ def _trade(**overrides):
 
 def _close_db(trade):
     db = MagicMock()
-    db.lock_trade = AsyncMock(return_value=trade)
+    db.trades.lock_trade = AsyncMock(return_value=trade)
     db.commit = AsyncMock()
     db.rollback = AsyncMock()
-    db.provider_quotes.get_latest_close_price = AsyncMock(return_value=None)
+    db.provider_quotes.get_latest_close_price_async = AsyncMock(return_value=None)
     db.valuations.add = MagicMock()
     db.session = MagicMock()
     return db
@@ -324,7 +324,7 @@ def test_provider_close_uses_the_book_side_and_not_the_full_quote_row():
 
     long_trade = _trade(market_data_provider="ALPHA", trade_price=10, quantity=1)
     long_db = _close_db(long_trade)
-    long_db.provider_quotes.get_latest_close_price = AsyncMock(return_value=quote)
+    long_db.provider_quotes.get_latest_close_price_async = AsyncMock(return_value=quote)
     asyncio.run(
         mods.close_trade.close_trade(
             long_db,
@@ -336,11 +336,11 @@ def test_provider_close_uses_the_book_side_and_not_the_full_quote_row():
         )
     )
     assert long_trade.close_price == 11
-    long_db.provider_quotes.get_latest.assert_not_called()
+    long_db.provider_quotes.get_latest_async.assert_not_called()
 
     short_trade = _trade(side="SELL", market_data_provider="ALPHA", trade_price=10, quantity=1)
     short_db = _close_db(short_trade)
-    short_db.provider_quotes.get_latest_close_price = AsyncMock(return_value=quote)
+    short_db.provider_quotes.get_latest_close_price_async = AsyncMock(return_value=quote)
     asyncio.run(
         mods.close_trade.close_trade(
             short_db,

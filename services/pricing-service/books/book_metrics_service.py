@@ -20,14 +20,15 @@ and the series uses the currency with the largest absolute value.
 """
 
 import logging
-import os
 import threading
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 
+from shared.trading_shared.env import env_int
+
 # Rolling window length (number of aligned observations). Configurable so the
 # assignment's "e.g. last 100 observations" can be tuned without a code change.
-WINDOW = int(os.getenv("BOOK_METRICS_WINDOW", "100"))
+WINDOW = env_int("BOOK_METRICS_WINDOW", 100)
 
 # Minimum number of aligned observations before alpha/beta are meaningful.
 MIN_OBSERVATIONS = 2
@@ -222,7 +223,7 @@ def get_metrics_for_book(book_id):
 def require_metrics(book_id):
     from fastapi import status
 
-    from api.errors import ApiError
+    from shared.trading_shared.http_errors import ApiError
 
     metrics = get_metrics_for_book(book_id)
     if metrics is None:

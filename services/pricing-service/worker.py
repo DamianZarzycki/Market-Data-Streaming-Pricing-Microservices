@@ -12,7 +12,7 @@ import valuation_service
 from shared.trading_shared.audit import AuditLogger
 from shared.trading_shared.db import AsyncDBSessionManager
 from shared.trading_shared.enums import AssetClass, ConnectionStatus, EventType
-from shared.trading_shared.env import env
+from shared.trading_shared.env import env, env_float, env_int
 
 stats_lock = threading.Lock()
 audit_logger = AuditLogger("pricing-service")
@@ -24,18 +24,19 @@ last_pricing_time = None
 last_valuation_symbol = None
 last_valuation_asset_class = None
 
-BASE_RECONNECT_DELAY = 1
-MAX_RECONNECT_DELAY = 30
+BASE_RECONNECT_DELAY = env_int("PRICING_BASE_RECONNECT_DELAY_SECONDS", 1, minimum=0)
+MAX_RECONNECT_DELAY = env_int("PRICING_MAX_RECONNECT_DELAY_SECONDS", 30)
 _MARKET_DATA_SERVICE_URL = env("MARKET_DATA_SERVICE_URL").rstrip("/")
 MARKET_DATA_STREAM_URL = f"{_MARKET_DATA_SERVICE_URL}/stream"
 MARKET_DATA_INTEGRATION_URL = env("MARKET_DATA_INTEGRATION_URL").rstrip("/")
-QUOTE_CONCURRENCY = 8
-QUOTE_TIMEOUT_SECONDS = 5.0
-STREAM_CONNECT_TIMEOUT_SECONDS = 5.0
-STREAM_READ_TIMEOUT_SECONDS = 30.0
-VALUATION_BATCH_CAP = 200
-VALUATION_FLUSH_ATTEMPTS = 3
-FLUSH_RETRY_SECONDS = 0.5
+QUOTE_CONCURRENCY = env_int("PRICING_QUOTE_CONCURRENCY", 8)
+QUOTE_TIMEOUT_SECONDS = env_float("PRICING_QUOTE_TIMEOUT_SECONDS", 5.0, minimum=0.1)
+STREAM_CONNECT_TIMEOUT_SECONDS = env_float("PRICING_STREAM_CONNECT_TIMEOUT_SECONDS", 5.0, minimum=0.1)
+STREAM_READ_TIMEOUT_SECONDS = env_float("PRICING_STREAM_READ_TIMEOUT_SECONDS", 30.0, minimum=0.1)
+VALUATION_BATCH_CAP = env_int("PRICING_VALUATION_BATCH_CAP", 200)
+VALUATION_FLUSH_ATTEMPTS = env_int("PRICING_VALUATION_FLUSH_ATTEMPTS", 3)
+FLUSH_RETRY_SECONDS = env_float("PRICING_FLUSH_RETRY_SECONDS", 0.5, minimum=0.0)
+POLL_INTERVAL_SECONDS = env_float("PRICING_POLL_INTERVAL_SECONDS", 5.0, minimum=0.1)
 
 http_client: httpx2.AsyncClient | None = None
 
@@ -211,7 +212,7 @@ async def cache_refresh_worker():
         active_ids = await cache_service.reload_active_trades_cache()
         if active_ids is not None:
             calculation_service.valuation_feed.evict_inactive(active_ids)
-        await asyncio.sleep(5)
+        await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
 
 # Async: awaits AsyncClient.get for one provider quote.
@@ -277,7 +278,7 @@ async def provider_pricing_worker():
             raise
         except Exception as exc:
             logging.error(f"Error in provider_pricing_worker: {exc}")
-        await asyncio.sleep(5)
+        await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
 
 # Async task: awaits the curve read and asyncio.sleep between passes.
@@ -296,7 +297,7 @@ async def curve_pricing_worker():
             raise
         except Exception as exc:
             logging.error(f"Error in curve_pricing_worker: {exc}")
-        await asyncio.sleep(5)
+        await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
 
 # Async: awaits AsyncSession.commit. Builds a fresh row on every attempt.

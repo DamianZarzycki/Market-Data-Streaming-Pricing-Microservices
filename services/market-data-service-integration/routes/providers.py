@@ -1,7 +1,7 @@
 from fastapi import FastAPI, status
 
 from api.schemas import ProviderProbe, ProvidersHealthResponse, ProvidersResponse
-from core import state
+from core import runtime
 from core.provider_health import list_provider_names, probe_quote_providers, provider_health
 
 
@@ -14,7 +14,7 @@ def register(app: FastAPI) -> None:
         status_code=status.HTTP_200_OK,
     )
     def providers() -> dict:
-        return list_provider_names(state.get_quote_service(), state.get_curve_service())
+        return list_provider_names(runtime.get_quote_service(), runtime.get_curve_service())
 
     # Async handler: awaits asyncio.gather of the live quote probes.
     @app.get(
@@ -23,7 +23,7 @@ def register(app: FastAPI) -> None:
         status_code=status.HTTP_200_OK,
     )
     async def providers_health() -> dict:
-        return await probe_quote_providers(state.get_quote_service())
+        return await probe_quote_providers(runtime.get_quote_service())
 
     # Async handler: awaits AsyncClient.get for that provider.
     @app.get(
@@ -33,7 +33,7 @@ def register(app: FastAPI) -> None:
     )
     async def one_provider_health(provider: str) -> dict:
         return await provider_health(
-            state.get_quote_service(),
-            state.get_curve_service(),
+            runtime.get_quote_service(),
+            runtime.get_curve_service(),
             provider,
         )

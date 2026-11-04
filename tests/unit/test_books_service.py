@@ -1,10 +1,9 @@
 import asyncio
-import importlib.util
 import sys
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -16,17 +15,7 @@ sys.path.insert(0, str(BACKEND))
 
 from service_loader import load_service
 from shared.trading_shared.enums import EventType
-from shared.trading_shared.models import Book
-
-
-def _body_limit():
-    spec = importlib.util.spec_from_file_location(
-        "books_body_limit",
-        BACKEND / "services" / "books-service" / "api" / "body_limit.py",
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+from shared.trading_shared.http_errors import MAX_BODY_BYTES, MaxBodySizeMiddleware
 
 
 @contextmanager
@@ -35,13 +24,20 @@ def _client(session=None):
     stack = ExitStack()
     stack.enter_context(patch.object(app_module, "start_retention"))
     stack.enter_context(patch.object(app_module, "stop_retention"))
-    stack.enter_context(patch.object(app_module.AuditLogger, "info"))
-    warning = stack.enter_context(patch.object(app_module.AuditLogger, "warning"))
-    error = stack.enter_context(patch.object(app_module.AuditLogger, "error"))
+    stack.enter_context(patch.object(app_module.AuditLogger, "ainfo", new_callable=AsyncMock))
+    warning = stack.enter_context(
+        patch.object(app_module.AuditLogger, "awarning", new_callable=AsyncMock)
+    )
+    error = stack.enter_context(
+        patch.object(app_module.AuditLogger, "aerror", new_callable=AsyncMock)
+    )
     session_local = None
     if session is not None:
         session_local = stack.enter_context(
-            patch("api.dependencies.SessionLocal", return_value=session)
+            patch(
+                "shared.trading_shared.db._async_session_factory",
+                return_value=lambda: session,
+            )
         )
     client = stack.enter_context(
         TestClient(app_module.app, raise_server_exceptions=False)
@@ -53,9 +49,18 @@ def _client(session=None):
 
 
 def _session():
-    db = MagicMock()
-    db.in_transaction.return_value = True
+    db = AsyncMock()
+    # AsyncSession.add only stages a row. It is not awaited.
+    db.add = MagicMock()
+    db.in_transaction = MagicMock(return_value=True)
     return db
+
+
+def _execute_result(**methods):
+    result = MagicMock()
+    for name, value in methods.items():
+        getattr(result, name).return_value = value
+    return result
 
 
 def _manager():
@@ -72,7 +77,7 @@ def test_get_books_commits_and_closes_the_session():
         expected_asset_class="EQUITY",
         is_active=True,
     )
-    db.query.return_value.filter.return_value.all.return_value = [row]
+    db.execute.return_value = _execute_result(all=[row])
     with _client(db) as (client, _, _, _, error, _):
         response = client.get("/books")
     assert response.status_code == 200
@@ -95,7 +100,7 @@ def test_get_books_commits_and_closes_the_session():
 
 def test_get_books_rolls_back_and_closes_when_the_query_fails():
     db = _session()
-    db.query.side_effect = RuntimeError("db down")
+    db.execute.side_effect = RuntimeError("db down")
     with _client(db) as (client, _, _, warning, error, _):
         response = client.get("/books")
     assert response.status_code == 500
@@ -119,18 +124,18 @@ def test_health_does_not_open_a_session():
 
 def test_get_book_queries_only_the_response_columns():
     manager = _manager()
-    db = MagicMock()
-    db.query.return_value.filter.return_value.all.return_value = []
+    db = AsyncMock()
+    db.execute.return_value = _execute_result(all=[])
     with patch.object(manager.logging, "debug") as debug:
-        assert manager.get_all_books(db) == []
-    columns = db.query.call_args.args
-    assert columns == (
-        Book.book_id,
-        Book.name,
-        Book.description,
-        Book.expected_asset_class,
-        Book.is_active,
-    )
+        assert asyncio.run(manager.get_all_books(db)) == []
+    statement = db.execute.await_args.args[0]
+    assert [column.key for column in statement.selected_columns] == [
+        "book_id",
+        "name",
+        "description",
+        "expected_asset_class",
+        "is_active",
+    ]
     assert all("%s" in call.args[0] for call in debug.call_args_list)
     debug.assert_called()
 
@@ -138,12 +143,14 @@ def test_get_book_queries_only_the_response_columns():
 def test_get_book_commits_and_closes_the_session():
     book_id = uuid4()
     db = _session()
-    db.query.return_value.filter.return_value.first.return_value = SimpleNamespace(
-        book_id=book_id,
-        name="Equity",
-        description=None,
-        expected_asset_class="EQUITY",
-        is_active=True,
+    db.execute.return_value = _execute_result(
+        first=SimpleNamespace(
+            book_id=book_id,
+            name="Equity",
+            description=None,
+            expected_asset_class="EQUITY",
+            is_active=True,
+        )
     )
     with _client(db) as (client, _, _, _, error, _):
         response = client.get(f"/books/{book_id}")
@@ -159,7 +166,7 @@ def test_get_book_commits_and_closes_the_session():
 def test_missing_book_is_404():
     book_id = uuid4()
     db = _session()
-    db.query.return_value.filter.return_value.first.return_value = None
+    db.execute.return_value = _execute_result(first=None)
     with _client(db) as (client, _, _, _, error, _):
         response = client.get(f"/books/{book_id}")
     assert response.status_code == 404
@@ -184,11 +191,15 @@ def test_non_uuid_book_id_is_400():
 def test_asset_class_change_does_not_count_trades():
     manager = _manager()
     book = MagicMock()
-    db = MagicMock()
-    db.query.return_value.filter.return_value.first.return_value = book
+    db = AsyncMock()
+    found = MagicMock()
+    found.scalars.return_value.first.return_value = book
+    db.execute.return_value = found
     with patch.object(manager, "count_active_trades") as count, patch.object(manager, "append_audit") as append:
-        updated = manager.update_book(
-            db, "book-1", {"expected_asset_class": "FX"}, updated_by="API"
+        updated = asyncio.run(
+            manager.update_book(
+                db, "book-1", {"expected_asset_class": "FX"}, updated_by="API"
+            )
         )
     count.assert_not_called()
     assert book.expected_asset_class == "FX"
@@ -201,12 +212,14 @@ def test_asset_class_change_does_not_count_trades():
 
 def test_create_stages_db_create_on_the_request_session():
     manager = _manager()
-    db = MagicMock()
+    db = _session()
     with patch.object(manager, "append_audit") as append:
-        manager.create_books_batch(
-            db,
-            [{"name": "Equity", "expected_asset_class": "EQUITY"}],
-            created_by="API",
+        asyncio.run(
+            manager.create_books_batch(
+                db,
+                [{"name": "Equity", "expected_asset_class": "EQUITY"}],
+                created_by="API",
+            )
         )
     db.commit.assert_not_called()
     db.flush.assert_called_once()
@@ -217,11 +230,11 @@ def test_create_stages_db_create_on_the_request_session():
 
 def test_duplicate_name_in_batch_commits_only_the_reject_audit():
     manager = _manager()
-    db = MagicMock()
+    db = _session()
     book = {"name": "Equity", "expected_asset_class": "EQUITY"}
     with patch.object(manager, "append_audit") as append:
         with pytest.raises(manager.ApiError) as exc:
-            manager.create_books_batch(db, [book, dict(book)])
+            asyncio.run(manager.create_books_batch(db, [book, dict(book)]))
     assert exc.value.status_code == 409
     assert "Duplicate book name" in exc.value.message
     db.rollback.assert_called_once()
@@ -232,12 +245,14 @@ def test_duplicate_name_in_batch_commits_only_the_reject_audit():
 
 def test_unique_constraint_commits_only_the_reject_audit():
     manager = _manager()
-    db = MagicMock()
+    db = _session()
     db.flush.side_effect = IntegrityError("insert", {}, Exception("unique"))
     with patch.object(manager, "append_audit") as append:
         with pytest.raises(manager.ApiError) as exc:
-            manager.create_books_batch(
-                db, [{"name": "Equity", "expected_asset_class": "EQUITY"}]
+            asyncio.run(
+                manager.create_books_batch(
+                    db, [{"name": "Equity", "expected_asset_class": "EQUITY"}]
+                )
             )
     assert "already exists" in exc.value.message
     db.rollback.assert_called_once()
@@ -248,14 +263,16 @@ def test_unique_constraint_commits_only_the_reject_audit():
 def test_delete_with_active_trades_commits_only_the_reject_audit():
     manager = _manager()
     book = MagicMock()
-    db = MagicMock()
-    db.query.return_value.filter.return_value.first.return_value = book
+    db = AsyncMock()
+    found = MagicMock()
+    found.scalars.return_value.first.return_value = book
+    db.execute.return_value = found
     with (
-        patch.object(manager, "count_active_trades", return_value=4),
+        patch.object(manager, "count_active_trades", new_callable=AsyncMock, return_value=4),
         patch.object(manager, "append_audit") as append,
     ):
         with pytest.raises(manager.ApiError) as exc:
-            manager.delete_book(db, "book-1")
+            asyncio.run(manager.delete_book(db, "book-1"))
     assert exc.value.status_code == 409
     assert "4 active trade" in exc.value.message
     assert book.is_active is not False
@@ -268,13 +285,15 @@ def test_delete_with_active_trades_commits_only_the_reject_audit():
 def test_delete_stages_db_delete_on_the_request_session():
     manager = _manager()
     book = MagicMock()
-    db = MagicMock()
-    db.query.return_value.filter.return_value.first.return_value = book
+    db = AsyncMock()
+    found = MagicMock()
+    found.scalars.return_value.first.return_value = book
+    db.execute.return_value = found
     with (
-        patch.object(manager, "count_active_trades", return_value=0),
+        patch.object(manager, "count_active_trades", new_callable=AsyncMock, return_value=0),
         patch.object(manager, "append_audit") as append,
     ):
-        result = manager.delete_book(db, "book-1")
+        result = asyncio.run(manager.delete_book(db, "book-1"))
     assert result == {"message": "Book with id book-1 marked as inactive"}
     assert book.is_active is False
     db.commit.assert_not_called()
@@ -285,7 +304,12 @@ def test_delete_stages_db_delete_on_the_request_session():
 def test_create_failure_rolls_back_and_audits_db_error_on_its_own_session():
     db = _session()
     with _client(db) as (client, manager, _, _, error, _):
-        with patch.object(manager, "create_books_batch", side_effect=RuntimeError("boom")):
+        with patch.object(
+            manager,
+            "create_books_batch",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("boom"),
+        ):
             response = client.post(
                 "/books",
                 json={"name": "Equity", "expected_asset_class": "EQUITY"},
@@ -304,7 +328,7 @@ def test_create_accepts_one_object_or_a_list():
     db = _session()
     seen = []
 
-    def capture(_db, books, created_by=None):
+    async def capture(_db, books, created_by=None):
         seen.append((len(books), created_by))
         return ["id-1"]
 
@@ -365,11 +389,13 @@ def test_put_and_delete_keep_their_message_bodies():
             patch.object(
                 manager,
                 "update_book",
+                new_callable=AsyncMock,
                 return_value={"message": f"Book with id {book_id} updated successfully"},
             ),
             patch.object(
                 manager,
                 "delete_book",
+                new_callable=AsyncMock,
                 return_value={"message": f"Book with id {book_id} marked as inactive"},
             ),
         ):
@@ -382,12 +408,11 @@ def test_put_and_delete_keep_their_message_bodies():
 
 
 def test_request_body_over_the_cap_is_rejected_before_the_session():
-    body_limit = _body_limit()
     db = _session()
     with _client(db) as (client, _, _, warning, error, session_local):
         response = client.post(
             "/books",
-            content=b"x" * (body_limit.MAX_BODY_BYTES + 1),
+            content=b"x" * (MAX_BODY_BYTES + 1),
             headers={"content-type": "application/json"},
         )
     assert response.status_code == 413
@@ -412,7 +437,7 @@ def test_declared_content_length_over_the_cap_is_not_read():
         async def send(message):
             sent.append(message)
 
-        middleware = _body_limit().MaxBodySizeMiddleware(app, max_bytes=4)
+        middleware = MaxBodySizeMiddleware(app, max_bytes=4)
         await middleware(
             {
                 "type": "http",
@@ -449,7 +474,7 @@ def test_chunked_body_over_the_cap_is_rejected():
         async def send(message):
             sent.append(message)
 
-        middleware = _body_limit().MaxBodySizeMiddleware(app, max_bytes=5)
+        middleware = MaxBodySizeMiddleware(app, max_bytes=5)
         await middleware(
             {"type": "http", "method": "POST", "headers": []},
             receive,
@@ -474,7 +499,7 @@ def test_body_within_the_cap_is_replayed_to_the_app():
         async def send(message):
             return None
 
-        middleware = _body_limit().MaxBodySizeMiddleware(app, max_bytes=8)
+        middleware = MaxBodySizeMiddleware(app, max_bytes=8)
         await middleware(
             {"type": "http", "method": "PUT", "headers": [(b"content-length", b"2")]},
             receive,
@@ -490,15 +515,13 @@ def test_service_start_and_stop_are_audited():
     app_module = load_service("books-service")
     order = []
 
-    def record(self, event_type, *args, **kwargs):
+    async def record(self, event_type, *args, **kwargs):
         order.append(event_type)
 
     with (
         patch.object(app_module, "start_retention", side_effect=lambda: order.append("start")),
         patch.object(app_module, "stop_retention", side_effect=lambda: order.append("stop")),
-        patch.object(app_module.AuditLogger, "info", record),
-        patch.object(app_module.AuditLogger, "warning"),
-        patch.object(app_module.AuditLogger, "error"),
+        patch.object(app_module.AuditLogger, "ainfo", record),
     ):
         with TestClient(app_module.app):
             pass

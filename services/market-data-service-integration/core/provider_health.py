@@ -2,8 +2,8 @@ import asyncio
 
 from fastapi import status
 
-from api.errors import ApiError
-from core.polling.config import DEFAULT_POLL_SYMBOL, now_utc_iso
+from shared.trading_shared.http_errors import ApiError
+from core.polling import DEFAULT_POLL_SYMBOL, now_utc_iso
 
 
 QUOTE_KIND = "quote"
