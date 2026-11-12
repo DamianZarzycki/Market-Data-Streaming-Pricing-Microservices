@@ -1,79 +1,158 @@
-import threading
+import asyncio
+import logging
 from typing import TypedDict
 
+from shared.trading_shared.env import env_int
+
 from .config import generator_config
+
+_JOIN_TIMEOUT_S = env_int("TRADE_GENERATION_JOIN_TIMEOUT_SECONDS", 25)
 
 
 class GeneratorState(TypedDict):
     is_running: bool
     total_generated: int
-    thread: threading.Thread | None
+    send_failures: int
+    task: asyncio.Task | None
 
 
-# Check-and-set of is_running is not atomic on ThreadedServer; two POST /start
-# calls can both pass the guard (RACE-3). All start/stop transitions take this
-# lock. _stop_event lets the worker wake immediately on /stop instead of
-# sleeping out the remaining interval.
-_state_lock = threading.Lock()
-_stop_event = threading.Event()
-_stop_event.set()
+# One event loop (`uvicorn --workers 1`). Dict updates do not await, so they
+# do not need a thread lock. `stop_event` is set while the worker is stopped
+# and stays clear for the whole run, so `Event.wait()` blocks. `/stop` sets it
+# and the interval wait returns.
+stop_event = asyncio.Event()
+stop_event.set()
+
+# Held for one generate/send, and for a config publish that includes the
+# provider-mode PUT. The worker releases it before waiting out the interval.
+_generation_lock = asyncio.Lock()
 
 generator_state: GeneratorState = {
     "is_running": False,
     "total_generated": 0,
-    "thread": None,
+    "send_failures": 0,
+    "task": None,
 }
 
 
-def expected_rate_per_sec():
-    if not generator_state["is_running"]:
-        return 0.0
+def generation_lock() -> asyncio.Lock:
+    return _generation_lock
+
+
+def generator_is_running() -> bool:
+    
+    return generator_state["is_running"]
+
+
+def snapshot_status() -> dict:
+    running = generator_state["is_running"]
     interval_ms = generator_config["interval_ms"]
-    if interval_ms <= 0:
-        return 0.0
-    return round(1000.0 / interval_ms, 4)
+    if not running or interval_ms <= 0:
+        rate = 0.0
+    else:
+        rate = round(1000.0 / interval_ms, 4)
+    return {
+        "is_running": running,
+        "total_generated": generator_state["total_generated"],
+        "send_failures": generator_state["send_failures"],
+        "expected_rate_per_sec": rate,
+    }
 
 
-def start_generator(target):
-    """Start the generation worker. Returns False if one is already running."""
-    with _state_lock:
-        thread = generator_state["thread"]
-        if generator_state["is_running"] or (thread is not None and thread.is_alive()):
-            return False
-        _stop_event.clear()
-        generator_state["is_running"] = True
-        worker_thread = threading.Thread(target=target, daemon=True)
-        generator_state["thread"] = worker_thread
-        worker_thread.start()
-        return True
+def expected_rate_per_sec():
+    return snapshot_status()["expected_rate_per_sec"]
 
 
-def stop_generator():
-    """Request the generation worker to stop. Returns False if it was not running."""
-    with _state_lock:
-        thread = generator_state["thread"]
-        if not generator_state["is_running"] and not (
-            thread is not None and thread.is_alive()
-        ):
-            return False
+def record_generated(count: int = 1) -> None:
+    if count <= 0:
+        return
+    generator_state["total_generated"] += count
+
+
+def record_send_failure() -> None:
+    """Count a failed send in memory. Does not open a database session."""
+    generator_state["send_failures"] += 1
+
+
+def generator_should_stop() -> bool:
+    return stop_event.is_set()
+
+
+async def pause_for_retry(delay_s: float, *, wake_on_stop: bool) -> bool:
+    """Wait up to `delay_s`. Return True when the worker should stop retrying.
+
+    Route calls pass `wake_on_stop=False` and sleep the full delay. The worker
+    passes True. `/stop` sets `stop_event`, and that ends the wait early.
+    """
+    if not wake_on_stop:
+        await asyncio.sleep(delay_s)
+        return False
+    try:
+        await asyncio.wait_for(stop_event.wait(), delay_s)
+    except asyncio.TimeoutError:
+        return False
+    return True
+
+
+async def start_generator(target) -> bool:
+    """Schedule the generation task. Returns False if one is already running.
+
+    There is no `await` between the check and `create_task`, so a second
+    `POST /start` cannot pass the guard.
+    """
+    task = generator_state["task"]
+    if task is not None and not task.done():
+        return False
+    stop_event.clear()
+    generator_state["is_running"] = True
+    try:
+        generator_state["task"] = asyncio.create_task(
+            target(),
+            name="trade-generation-worker",
+        )
+    except Exception:
+        generator_state["task"] = None
         generator_state["is_running"] = False
-        _stop_event.set()
-        return True
+        stop_event.set()
+        raise
+    return True
 
 
-def generator_should_stop():
-    return _stop_event.is_set()
+async def stop_generator() -> bool:
+    """Stop the worker and wait for the in-flight send. False if it was not running.
+
+    After `_JOIN_TIMEOUT_S`, `wait_for` cancels the worker and still waits
+    while it finishes the shielded send. The task reference is cleared only
+    after that same task has finished, so a stop cannot drop a newer task.
+    """
+    task = generator_state["task"]
+    alive = task is not None and not task.done()
+    if not generator_state["is_running"] and not alive:
+        return False
+    generator_state["is_running"] = False
+    stop_event.set()
+    if task is not None and not task.done():
+        try:
+            await asyncio.wait_for(task, _JOIN_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            logging.error(
+                "trade generation worker did not stop within %ss and was cancelled",
+                _JOIN_TIMEOUT_S,
+            )
+        except asyncio.CancelledError:
+            # Swallow the worker's own cancellation; re-raise one aimed at this call.
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
+    if generator_state["task"] is task and (task is None or task.done()):
+        generator_state["task"] = None
+    return True
 
 
-def wait_for_stop(timeout_s):
-    """Block until /stop or timeout. Returns True if stop was requested."""
-    return _stop_event.wait(timeout_s)
+def mark_generator_stopped() -> None:
+    """Worker exit hook. Does not clear the task reference.
 
-
-def mark_generator_stopped():
-    with _state_lock:
-        if generator_state["thread"] is not threading.current_thread():
-            return
-        generator_state["is_running"] = False
-        generator_state["thread"] = None
-        _stop_event.set()
+    `stop_generator` drops the reference only after `task.done()`.
+    """
+    generator_state["is_running"] = False
+    stop_event.set()

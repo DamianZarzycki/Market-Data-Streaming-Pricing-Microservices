@@ -1,126 +1,50 @@
 import logging
+from contextlib import asynccontextmanager
 
-import generator
-import worker
-from bottle import Bottle, request, response
-from generator.http import set_trade_action_provider_mode
-from custom_server import ThreadedServer
+import uvicorn
+from fastapi import FastAPI
 
-from shared.trading_shared.enums import ServiceStatus
+from generator.config import get_config
+from generator.http import open_http, push_provider_mode_best_effort, shutdown_http
+from generator.lifecycle import stop_generator
+from routes import register_routes
+from shared.trading_shared.db import dispose_async_engine
+from shared.trading_shared.http_errors import MaxBodySizeMiddleware, install_error_handlers
 from shared.trading_shared.logging_config import configure_logging
 
 configure_logging("trade-generation-service")
-app = Bottle()
-logging.info("Runtime generator config: %s", generator.get_config())
+logging.info("Runtime generator config: %s", get_config())
 
 
-@app.route("/health")
-def health():
-    return {
-        "service": "trade-generation-service",
-        "status": ServiceStatus.UP.value,
-    }
-
-
-@app.route("/generate-once", method=["GET"])
-def generate_once():
-    logging.info("Received request to generate a trade intention")
-    if not generator.generator_state["is_running"]:
-        logging.info("DB worker not running")
-
-    intention = generator.generate_and_send_to_trade_action_service()
-    return intention if intention else {"message": "No trade intention generated."}
-
-@app.route('/generate-trade', method=["POST"])
-def generate_trade():
-    # From the request body we need to create the trade and send it to the trade-action-service
-    logging.info("Received request to generate a trade intention with payload")
-    payload = request.json
-    if not payload:
-        response.status = 400
-        return {"message": "Missing payload data"}
-
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # One process only. Config, the worker task, and the counters are in memory.
+    # The worker itself stays stopped until POST /start.
+    await open_http()
+    await push_provider_mode_best_effort()
     try:
-        intention = generator.generate_and_send_to_trade_action_service(payload)
-    except ValueError as exc:
-        response.status = 400
-        return {"message": str(exc)}
-
-    return intention if intention else {"message": "No trade intention generated."}
-
-@app.route("/generate-batch", method=["GET"])
-def generate_multiple():
-    logging.info("Received request to generate multiple trade intentions")
-    if not generator.generator_state["is_running"]:
-        logging.info("DB worker not running")
-
-    intentions = generator.generate_and_send_to_trade_action_service_batch()
-    if intentions:
-        return {
-            "message": f"Successfully generated {len(intentions)} intentions",
-            "intentions": intentions,
-        }
-    else:
-        return {"message": "No trade intentions generated."}
+        yield
+    finally:
+        await stop_generator()
+        await shutdown_http()
+        await dispose_async_engine()
 
 
-@app.route("/start", method=["POST"])
-def start_generation():
-    if not generator.start_generator(worker.trade_generation_worker):
-        response.status = 400
-        return {"message": "Generator is already running!"}
-
-    return {"message": "Generator started successfully."}
+def _log_invalid_body(_request, exc) -> None:
+    logging.warning("Rejected invalid request body: %s", exc.errors())
 
 
-@app.route("/stop", method=["POST"])
-def stop_generation():
-    if not generator.stop_generator():
-        response.status = 400
-        return {"message": "No data available."}
-
-    return {"message": "Generator was stopped."}
-
-
-@app.route("/config", method=["GET"])
-def get_config():
-    return generator.get_config()
-
-
-@app.route("/config", method=["PUT"])
-def put_config():
-    payload = request.json
-    previous_provider_mode = generator.get_config().get("use_provider_data")
-    try:
-        config = generator.update_config(payload)
-    except ValueError as exc:
-        response.status = 400
-        return {"message": str(exc)}
-
-    if isinstance(payload, dict) and "use_provider_data" in payload:
-        try:
-            set_trade_action_provider_mode(config["use_provider_data"])
-        except ValueError as exc:
-            generator.update_config({"use_provider_data": previous_provider_mode})
-            response.status = 502
-            return {"message": str(exc)}
-
-    return {
-        "message": "Config updated successfully.",
-        "config": generator.get_config(),
-    }
-
-
-@app.route("/status", method=["GET"])
-def status():
-    state = generator.generator_state
-    return {
-        "is_running": state["is_running"],
-        "total_generated": state["total_generated"],
-        "expected_rate_per_sec": generator.expected_rate_per_sec(),
-    }
+app = FastAPI(lifespan=lifespan)
+app.add_middleware(MaxBodySizeMiddleware, error_key="message")
+install_error_handlers(
+    app,
+    error_key="message",
+    invalid_message="Invalid JSON payload",
+    on_validation=_log_invalid_body,
+)
+register_routes(app)
 
 
 if __name__ == "__main__":
     logging.info("Starting Trade Generation service...")
-    app.run(host="0.0.0.0", port=8007, server=ThreadedServer)
+    uvicorn.run("app:app", host="0.0.0.0", port=8007, workers=1)

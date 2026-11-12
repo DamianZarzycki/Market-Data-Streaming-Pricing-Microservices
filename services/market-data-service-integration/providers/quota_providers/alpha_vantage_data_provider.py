@@ -1,10 +1,10 @@
-from datetime import datetime, timezone
-from providers.quota_providers._base import BaseProvider, ProviderAPIError
-import urllib.request
-import os
-import json
 import logging
-api_key: str = os.getenv("ALPHAVANTAGE_API_KEY") or ""
+from datetime import datetime, timezone
+
+from providers.quota_providers._base import BaseProvider, ProviderAPIError
+from shared.trading_shared.env import env_str
+
+api_key: str = env_str("ALPHAVANTAGE_API_KEY", "")
 
 
 def _to_float(value):
@@ -21,11 +21,9 @@ class AlphaVantageProvider(BaseProvider):
         super().__init__(api_key)
         self.url = "https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={symbol}&apikey={api_key}"
 
-    
     def health(self):
         # easiest/cheapest api call to check if the provider is healthy
         pass
-    
 
     def provider_error(self, data) -> ProviderAPIError | None:
         if not isinstance(data, dict):
@@ -41,7 +39,6 @@ class AlphaVantageProvider(BaseProvider):
         if not quote or quote.get("05. price") in (None, ""):
             return ProviderAPIError("empty Global Quote")
         return None
-
 
     def normalize_data(self, data, symbol) -> dict:
         quote = data.get("Global Quote") or {}
@@ -67,9 +64,7 @@ class AlphaVantageProvider(BaseProvider):
             "raw_payload": data,
         }
 
-    def fetch_data(self, symbol: str):
+    # Async: awaits AsyncClient.get.
+    async def fetch_data(self, symbol: str):
         logging.info("Fetching data from AlphaVantage for symbol: %s", symbol)
-        req = urllib.request.Request(self.url.format(symbol=symbol, api_key=self.api_key))
-        with urllib.request.urlopen(req) as response:
-            return json.loads(response.read().decode())
-
+        return await self.get_json(self.url.format(symbol=symbol, api_key=self.api_key))

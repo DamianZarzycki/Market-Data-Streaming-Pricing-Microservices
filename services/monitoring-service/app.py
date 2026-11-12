@@ -1,47 +1,60 @@
-import threading
+import asyncio
 import logging
-from bottle import Bottle
-from custom_server import ThreadedServer
+from contextlib import asynccontextmanager
+
+import httpx2
+import uvicorn
+from fastapi import FastAPI
 
 from shared.trading_shared.audit import AuditLogger
-from shared.trading_shared.enums import EventType, ServiceStatus
+from shared.trading_shared.enums import EventType
+from shared.trading_shared.env import env_float
+from shared.trading_shared.http_errors import install_error_handlers
 from shared.trading_shared.logging_config import configure_logging
+
 import worker
+from routes import register_routes
 
 configure_logging("monitoring-service")
 
-app = Bottle()
 
-
-@app.route("/health")
-def health():
-    return {
-        "service": "monitoring-service",
-        "status": ServiceStatus.UP.value,
-    }
-
-
-@app.route("/status")
-def status():
-    # Envelope: services + environment + kpis (FE accepts flat map or wrapper).
-    return dict(worker.status_payload)
-
-
-if __name__ == "__main__":
-    logging.info("Starting Monitoring service...")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     audit_logger = AuditLogger("monitoring-service")
-    audit_logger.info(
+    await asyncio.to_thread(
+        audit_logger.info,
         EventType.WORKER_STARTED,
         "Monitoring service started",
         entity_type="Service",
         correlation_id=None,
     )
-
-    monitoring_thread = threading.Thread(target=worker.monitoring_worker)
-    monitoring_thread.daemon = True
-    monitoring_thread.start()
-
+    client = httpx2.AsyncClient(timeout=env_float("MONITORING_PROBE_TIMEOUT_SECONDS", 2.0, minimum=0.1))
+    task = asyncio.create_task(worker.monitoring_worker(client))
     try:
-        app.run(host="0.0.0.0", port=8003, server=ThreadedServer)
+        yield
     finally:
-        audit_logger.info(EventType.WORKER_STOPPED, "Monitoring Worker stopped", entity_type="Service", correlation_id=None)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logging.exception("Monitoring worker stopped with an error")
+        await client.aclose()
+        await asyncio.to_thread(
+            audit_logger.info,
+            EventType.WORKER_STOPPED,
+            "Monitoring Worker stopped",
+            entity_type="Service",
+            correlation_id=None,
+        )
+
+
+app = FastAPI(lifespan=lifespan)
+install_error_handlers(app)
+register_routes(app)
+
+
+if __name__ == "__main__":
+    logging.info("Starting Monitoring service...")
+    uvicorn.run("app:app", host="0.0.0.0", port=8003, workers=1)

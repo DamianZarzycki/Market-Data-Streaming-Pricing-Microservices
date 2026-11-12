@@ -1,14 +1,16 @@
-import os
 import threading
 import time
 from collections import deque
 from datetime import datetime, timezone
 
-QUEUE_MAXSIZE = int(os.getenv("TRADE_ACTION_QUEUE_MAXSIZE", "100"))
-RECENT_ACTIONS_LIMIT = 50
-RECENT_REJECTS_LIMIT = 20
-THROUGHPUT_WINDOW_S = 60
-PRESSURE_FILL_PCT = 70
+from shared.trading_shared.enums import ServiceStatus
+from shared.trading_shared.env import env_int
+
+QUEUE_MAXSIZE = env_int("TRADE_ACTION_QUEUE_MAXSIZE", 100)
+RECENT_ACTIONS_LIMIT = env_int("TRADE_ACTION_RECENT_ACTIONS_LIMIT", 50)
+RECENT_REJECTS_LIMIT = env_int("TRADE_ACTION_RECENT_REJECTS_LIMIT", 20)
+THROUGHPUT_WINDOW_S = env_int("TRADE_ACTION_THROUGHPUT_WINDOW_SECONDS", 60)
+PRESSURE_FILL_PCT = env_int("TRADE_ACTION_PRESSURE_FILL_PCT", 70, minimum=0)
 
 _lock = threading.Lock()
 _state = {
@@ -41,6 +43,19 @@ def _prune_throughput(now_ts):
 def set_worker_running(running: bool):
     with _lock:
         _state["worker_running"] = running
+
+
+def is_worker_running() -> bool:
+    with _lock:
+        return _state["worker_running"]
+
+
+def health_payload() -> dict:
+    status = ServiceStatus.UP.value if is_worker_running() else ServiceStatus.DOWN.value
+    return {
+        "service": "trade-action-service",
+        "status": status,
+    }
 
 
 def record_rejected(action_type, client_request_id, symbol, note, latency_ms=1):

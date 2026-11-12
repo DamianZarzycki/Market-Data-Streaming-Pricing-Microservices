@@ -10,9 +10,15 @@ dependencies = [
     "alembic",
     "bottle",
     "psycopg[binary]",
-    "SQLAlchemy",
+    "sqlalchemy[asyncio]",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest"]
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["shared*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit"]

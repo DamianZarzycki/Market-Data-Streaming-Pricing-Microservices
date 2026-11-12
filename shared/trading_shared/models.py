@@ -77,6 +77,11 @@ class Trade(Base):
         DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
     )
 
+    __table_args__ = (
+        Index("ix_trades_book_id_status", "book_id", "status"),
+        Index("ix_trades_status_book_id", "status", "book_id"),
+    )
+
 
 class Valuation(Base):
     __tablename__ = "valuations"
@@ -97,6 +102,10 @@ class Valuation(Base):
     market_data_reference: Mapped[str | None] = mapped_column(Text, nullable=True)
     valuation_payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+    __table_args__ = (
+        Index("ix_valuations_trade_id_valuation_time", "trade_id", "valuation_time"),
+    )
 
 
 class MarketDataProviderLimits(Base):
@@ -141,6 +150,14 @@ class MarketDataProviderQuote(Base):
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     raw_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+Index(
+    "ix_provider_quotes_provider_symbol_received_at",
+    MarketDataProviderQuote.provider,
+    MarketDataProviderQuote.symbol,
+    MarketDataProviderQuote.received_at.desc(),
+)
 
 
 class MarketDataSpotPrice(Base):
@@ -210,3 +227,7 @@ class AuditLog(Base):
     message: Mapped[str] = mapped_column(Text, nullable=False)
     payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+    __table_args__ = (
+        Index("ix_audit_logs_created_at", "created_at"),
+    )

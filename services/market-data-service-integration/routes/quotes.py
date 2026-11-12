@@ -1,47 +1,51 @@
-from bottle import request
+from fastapi import FastAPI, Query, status
 
-from core.helpers import json_error, unknown_provider
-from core.polling.config import read_futures_contracts, read_symbol_map
+from api.schemas import QuoteResponse, QuotesResponse, SnapshotResponse, SymbolMapResponse
+from core import runtime
+from core.polling import symbol_catalog
 from shared.trading_shared.enums import AssetClass
 
 
-def register(app, quote_service):
-    @app.route("/market-data/symbols")
-    def market_data_symbols():
-        symbols = read_symbol_map()
-        contracts = {
-            contract.symbol: {
-                "underlying": contract.underlying,
-                "multiplier": contract.multiplier,
-            }
-            for contract in read_futures_contracts()
-        }
-        return {**symbols, "FUTURES_CONTRACTS": contracts}
+def register(app: FastAPI) -> None:
+    # Sync handler: reads symbol lists from the environment. There is no
+    # non-blocking I/O, so this stays a plain def and runs on the threadpool.
+    @app.get(
+        "/market-data/symbols",
+        response_model=SymbolMapResponse,
+        status_code=status.HTTP_200_OK,
+    )
+    def market_data_symbols() -> SymbolMapResponse:
+        return SymbolMapResponse.model_validate(symbol_catalog())
 
-    @app.route("/market-data/snapshot")
-    def market_data_snapshot():
-        return {"snapshot": quote_service().get_snapshot()}
+    # Async handler: awaits provider_quotes.get_all_latest_async.
+    @app.get(
+        "/market-data/snapshot",
+        response_model=SnapshotResponse,
+        response_model_exclude_unset=True,
+        status_code=status.HTTP_200_OK,
+    )
+    async def market_data_snapshot() -> dict:
+        return await runtime.get_quote_service().get_snapshot()
 
-    @app.route("/market-data/quotes")
-    def quotes():
-        symbol = (request.query.get("symbol") or "").strip().upper()
-        if not symbol:
-            return json_error(400, "symbol is required")
+    # Async handler: awaits provider_quotes.get_latest_for_symbol_async.
+    @app.get(
+        "/market-data/quotes",
+        response_model=QuotesResponse,
+        response_model_exclude_unset=True,
+        status_code=status.HTTP_200_OK,
+    )
+    async def quotes(
+        symbol: str = Query(""),
+        asset_class: str = Query(AssetClass.EQUITY.value),
+    ) -> dict:
+        return await runtime.get_quote_service().get_quotes(symbol, asset_class)
 
-        asset_class = (
-            request.query.get("asset_class") or AssetClass.EQUITY.value
-        ).strip().upper()
-        if asset_class not in {item.value for item in AssetClass}:
-            return json_error(400, f"Invalid asset_class: {asset_class}")
-
-        return {"quotes": quote_service().get_quotes(symbol, asset_class)}
-
-    @app.route("/market-data/quotes/<provider>/<symbol>")
-    def quote_by_provider(provider, symbol):
-        if provider not in quote_service().providers:
-            return unknown_provider(provider)
-
-        quote = quote_service().get_quote(provider, symbol.strip().upper())
-        if quote is None:
-            return json_error(404, "Quote not found")
-        return quote
+    # Async handler: awaits provider_quotes.get_latest_async.
+    @app.get(
+        "/market-data/quotes/{provider}/{symbol}",
+        response_model=QuoteResponse,
+        response_model_exclude_unset=True,
+        status_code=status.HTTP_200_OK,
+    )
+    async def quote_by_provider(provider: str, symbol: str) -> dict:
+        return await runtime.get_quote_service().get_quote(provider, symbol)

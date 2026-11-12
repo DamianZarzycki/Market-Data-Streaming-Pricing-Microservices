@@ -6,25 +6,25 @@ Keeping the age windows in one place means both services agree on what
 "stale" means for a given asset class.
 """
 
-import os
 from datetime import datetime, timezone
 
 from shared.trading_shared.enums import AssetClass
+from shared.trading_shared.env import env_int
 
 # How old a provider quote is allowed to be before it's considered stale, for
 # asset classes with no more specific entry below. Continuously-quoted
 # instruments (listed equities, FX) need a tight window; something like a
 # thinly-traded sovereign/corporate bond may only tick a few times a day.
-DEFAULT_MAX_QUOTE_AGE_SECONDS = int(os.getenv("TRADE_ACTION_MAX_QUOTE_AGE_SECONDS", "120"))
+DEFAULT_MAX_QUOTE_AGE_SECONDS = env_int("TRADE_ACTION_MAX_QUOTE_AGE_SECONDS", 120)
 ASSET_CLASS_MAX_QUOTE_AGE_SECONDS = {
-    AssetClass.EQUITY.value: int(os.getenv("TRADE_ACTION_MAX_QUOTE_AGE_EQUITY_SECONDS", "120")),
-    AssetClass.FX.value: int(os.getenv("TRADE_ACTION_MAX_QUOTE_AGE_FX_SECONDS", "60")),
-    AssetClass.FUTURES.value: int(os.getenv("TRADE_ACTION_MAX_QUOTE_AGE_FUTURES_SECONDS", "120")),
-    AssetClass.OPTION.value: int(os.getenv("TRADE_ACTION_MAX_QUOTE_AGE_OPTION_SECONDS", "120")),
-    AssetClass.COMMODITY.value: int(os.getenv("TRADE_ACTION_MAX_QUOTE_AGE_COMMODITY_SECONDS", "300")),
-    AssetClass.BOND.value: int(os.getenv("TRADE_ACTION_MAX_QUOTE_AGE_BOND_SECONDS", "86400")),
-    AssetClass.IRS.value: int(os.getenv("TRADE_ACTION_MAX_QUOTE_AGE_IRS_SECONDS", "86400")),
-    AssetClass.BENCHMARK.value: int(os.getenv("TRADE_ACTION_MAX_QUOTE_AGE_BENCHMARK_SECONDS", "86400")),
+    AssetClass.EQUITY.value: env_int("TRADE_ACTION_MAX_QUOTE_AGE_EQUITY_SECONDS", 120),
+    AssetClass.FX.value: env_int("TRADE_ACTION_MAX_QUOTE_AGE_FX_SECONDS", 60),
+    AssetClass.FUTURES.value: env_int("TRADE_ACTION_MAX_QUOTE_AGE_FUTURES_SECONDS", 120),
+    AssetClass.OPTION.value: env_int("TRADE_ACTION_MAX_QUOTE_AGE_OPTION_SECONDS", 120),
+    AssetClass.COMMODITY.value: env_int("TRADE_ACTION_MAX_QUOTE_AGE_COMMODITY_SECONDS", 300),
+    AssetClass.BOND.value: env_int("TRADE_ACTION_MAX_QUOTE_AGE_BOND_SECONDS", 86400),
+    AssetClass.IRS.value: env_int("TRADE_ACTION_MAX_QUOTE_AGE_IRS_SECONDS", 86400),
+    AssetClass.BENCHMARK.value: env_int("TRADE_ACTION_MAX_QUOTE_AGE_BENCHMARK_SECONDS", 86400),
 }
 
 

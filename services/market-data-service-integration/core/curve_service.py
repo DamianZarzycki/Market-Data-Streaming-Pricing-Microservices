@@ -1,13 +1,16 @@
 import logging
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from urllib.error import HTTPError, URLError
 
-from core.fetch_audit import CURVE_SERVICE, record_error, record_query, record_success
+import httpx2
+from fastapi import status
+
+from shared.trading_shared.http_errors import ApiError
+from core.audit import CURVE_SERVICE, record_error, record_query, record_success
+from core.polling import read_symbol_map
 from providers.curve_providers.ecb_provider import EcbProvider
 from providers.curve_providers.fred_provider import FredProvider
 from providers.curve_providers.nbp_provider import NbpProvider
-from shared.trading_shared.db import DBSessionManager
+from shared.trading_shared.db import AsyncDBSessionManager
 from shared.trading_shared.serialization import serialize
 
 # NBP Table A quotes most currencies as PLN per 1 unit. JPY is PLN per 100 JPY.
@@ -156,61 +159,87 @@ class CurveService:
     def create(cls) -> "CurveService":
         return cls(default_curve_providers())
 
-    def list_persisted(self) -> list[dict]:
-        with DBSessionManager() as db:
-            return [serialize(row) for row in db.market_data.get_latest_curves()]
+    # Async: awaits market_data.get_latest_curves_async.
+    async def list_persisted(self) -> dict:
+        async with AsyncDBSessionManager() as db:
+            rows = await db.market_data.get_latest_curves_async()
+            return {"curves": [serialize(row) for row in rows]}
 
-    def get_persisted(self, provider: str) -> dict | None:
-        with DBSessionManager() as db:
-            return serialize(db.market_data.get_latest_for_provider(provider.upper()))
+    # Async: awaits market_data.get_latest_for_provider_async.
+    async def curve_for_provider(self, provider: str) -> dict:
+        if provider.strip().lower() not in self.providers:
+            raise ApiError(status.HTTP_404_NOT_FOUND, f"Unknown provider: {provider}")
+        async with AsyncDBSessionManager() as db:
+            row = await db.market_data.get_latest_for_provider_async(provider.strip().upper())
+            curve = serialize(row)
+        if curve is None:
+            raise ApiError(status.HTTP_404_NOT_FOUND, "Curve not found")
+        return curve
 
-    def fx_quotes(self, symbol: str) -> list[dict]:
+    # Async: awaits market_data.get_latest_for_provider_async.
+    async def get_persisted(self, provider: str) -> dict | None:
+        async with AsyncDBSessionManager() as db:
+            return serialize(
+                await db.market_data.get_latest_for_provider_async(provider.strip().upper())
+            )
+
+    # Async: awaits get_persisted, which awaits the curve read.
+    async def fx_quotes(self, symbol: str) -> dict:
         """One NBP spot for an FX pair, shaped like a provider quote.
 
         ECB and FRED publish yield curves, not pair spots, so they are omitted.
         A missing NBP leg returns an empty list (the ticket shows MISSING).
         """
-        pair = symbol.strip().upper()
-        curve = self.get_persisted("nbp")
+        pair = (symbol or "").strip().upper()
+        if not pair:
+            raise ApiError(status.HTTP_400_BAD_REQUEST, "symbol is required")
+        curve = await self.get_persisted("nbp")
         if not curve or curve.get("curve_type") != "FX_SPOT":
-            return []
+            return {"quotes": []}
         last = nbp_cross_rate(pair, curve.get("tenors") or [], curve.get("rates") or [])
         if last is None:
-            return []
+            return {"quotes": []}
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        return [
-            {
-                "provider": "NBP",
-                "asset_class": "FX",
-                "symbol": pair,
-                "bid": None,
-                "ask": None,
-                "last": last,
-                "currency": pair[3:],
-                "provider_timestamp": _as_utc_z(curve.get("as_of_time")),
-                "received_at": _as_utc_z(curve.get("created_at")) or now,
-            }
-        ]
+        return {
+            "quotes": [
+                {
+                    "provider": "NBP",
+                    "asset_class": "FX",
+                    "symbol": pair,
+                    "bid": None,
+                    "ask": None,
+                    "last": last,
+                    "currency": pair[3:],
+                    "provider_timestamp": _as_utc_z(curve.get("as_of_time")),
+                    "received_at": _as_utc_z(curve.get("created_at")) or now,
+                }
+            ]
+        }
 
-    def curve_quotes(self, symbol: str, asset_class: str) -> list[dict]:
+    # Async: awaits get_persisted, which awaits the curve read.
+    async def curve_quotes(self, symbol: str, asset_class: str) -> dict:
         """Latest FRED (USD) or ECB (EUR) tenor for a bond or IRS symbol."""
+        symbol = (symbol or "").strip().upper()
+        asset_class = (asset_class or "").strip().upper()
+        if not symbol:
+            raise ApiError(status.HTTP_400_BAD_REQUEST, "symbol is required")
+        if asset_class not in {"BOND", "IRS"}:
+            raise ApiError(status.HTTP_400_BAD_REQUEST, "asset_class must be BOND or IRS")
+        if symbol not in read_symbol_map().get(asset_class, []):
+            raise ApiError(status.HTTP_400_BAD_REQUEST, f"Unknown {asset_class} symbol: {symbol}")
         parsed = parse_yield_symbol(symbol)
-        if parsed is None or parsed[0] != asset_class.strip().upper():
-            return []
+        if parsed is None or parsed[0] != asset_class:
+            return {"quotes": []}
         provider = _YIELD_PROVIDER_BY_CURRENCY[parsed[1]]
         quote = quote_from_yield_curve(
-            self.get_persisted(provider),
+            await self.get_persisted(provider),
             symbol,
             asset_class,
         )
-        return [quote] if quote else []
+        return {"quotes": [quote] if quote else []}
 
-    def get_curves(self) -> dict:
-        keys = list(self.providers)
-        with ThreadPoolExecutor(max_workers=max(len(keys), 1)) as pool:
-            return {"curves": list(pool.map(self.get_curve, keys))}
-
-    def get_curve(self, provider: str) -> dict:
+    # Async: awaits AsyncClient.get through the curve provider.
+    async def get_curve(self, provider: str) -> dict:
         provider_key = provider.strip().lower()
         record_query(CURVE_SERVICE)
 
@@ -227,7 +256,7 @@ class CurveService:
             })
 
         try:
-            raw = engine.fetch_data()
+            raw = await engine.fetch_data()
             provider_error = engine.provider_error(raw)
             if provider_error is not None:
                 return fail({
@@ -238,14 +267,22 @@ class CurveService:
             normalized = engine.normalize_data(raw)
             record_success(CURVE_SERVICE, normalized)
             return normalized
-        except HTTPError as exc:
-            logging.error("Curve provider %s HTTP %s", provider_key, exc.code)
+        except httpx2.TimeoutException:
+            logging.error("Curve provider %s timed out", provider_key)
+            return fail({
+                "provider": provider_key.upper(),
+                "error": "timeout",
+                "status": "timeout",
+            })
+        except httpx2.HTTPStatusError as exc:
+            code = exc.response.status_code
+            logging.error("Curve provider %s HTTP %s", provider_key, code)
             return fail({
                 "provider": provider_key.upper(),
                 "error": str(exc),
-                "status": "rate_limited" if exc.code == 429 else "error",
+                "status": "rate_limited" if code == 429 else "error",
             })
-        except (URLError, TimeoutError, OSError) as exc:
+        except httpx2.RequestError as exc:
             logging.error("Curve provider %s network error: %s", provider_key, exc)
             return fail({
                 "provider": provider_key.upper(),

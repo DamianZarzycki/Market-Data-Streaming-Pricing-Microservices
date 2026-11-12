@@ -10,9 +10,10 @@ class NbpProvider(CurveProviderBase):
     def __init__(self):
         super().__init__(self.key)
 
-    def fetch_data(self):
+    # Async: awaits AsyncClient.get.
+    async def fetch_data(self):
         logging.info("Fetching NBP FX table A")
-        return self.get_json(self.url)
+        return await self.get_json(self.url)
 
     def provider_error(self, data) -> str | None:
         if not isinstance(data, list) or not data:

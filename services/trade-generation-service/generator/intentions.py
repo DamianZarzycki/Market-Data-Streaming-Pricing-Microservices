@@ -1,15 +1,19 @@
+import asyncio
 import datetime
 import logging
 import random
 import uuid
 
-from shared.trading_shared.db import DBSessionManager
+from sqlalchemy import func, select
+
+from shared.trading_shared.http_errors import ApiError
+from shared.trading_shared.db import AsyncDBSessionManager
 from shared.trading_shared.enums import ActionType, AssetClass, TradeSide, TradeSource, TradeStatus
+from shared.trading_shared.models import Trade
 
 from .config import generator_config
 from .http import (
     _BOOKS_URL,
-    _HTTP_POOL,
     _INTEGRATION_SNAPSHOT_URL,
     _INTEGRATION_SYMBOLS_URL,
     _SNAPSHOT_URL,
@@ -18,9 +22,10 @@ from .http import (
     forward_supplied_trade_action,
     send_to_trade_action_service,
 )
-from .lifecycle import generator_state
+from .lifecycle import record_generated
 
-_NO_SHARED_CONTEXT = object()
+_SEND_FAILED = "Failed to send trade intention to trade-action-service"
+_BATCH_SEND_FAILED = "Failed to send trade intentions to trade-action-service"
 
 
 def generate_open_or_close_trade():
@@ -32,51 +37,79 @@ def generate_open_or_close_trade():
         ],
     )[0]
 
-def generate_and_send_to_trade_action_service_batch(count=None):
-    if count is None:
-        count = generator_config["batch_size"]
 
-    open_context = _fetch_open_market_context()
-    batch_payload = []
-
-    for _ in range(count):
-        intention = generate_random_intention(open_context=open_context)
-        if intention:
-            batch_payload.append(intention)
-            generator_state["total_generated"] += 1
-
-    if batch_payload:
-        send_to_trade_action_service(batch_payload)
-        return batch_payload
-        
-    logging.info("Couldn't generate any intentions for batch.")
+def _close_source():
+    if generator_config.get("use_provider_data"):
+        return TradeSource.TRADING_TICKET.value
     return None
 
 
-def generate_and_send_to_trade_action_service(payload=None):
+async def generate_and_send_to_trade_action_service_batch(count=None, *, wake_on_stop: bool = False):
+    """Build up to `count` intentions, then one batch POST after the DB session is closed.
+
+    Callers hold the generation lock. Close candidates come from one SQL read,
+    so the same trade is not chosen twice. Rolls that cannot be closed become
+    opens, and the books/symbols/snapshot fetch runs once for those opens.
+    """
+    if count is None:
+        count = generator_config["batch_size"]
+
+    actions = [generate_open_or_close_trade() for _ in range(count)]
+    close_slots = sum(action == ActionType.CLOSE_TRADE.value for action in actions)
+    closes = await _select_closes(close_slots, _close_source()) if close_slots else []
+    batch_payload = [_close_payload(row) for row in closes]
+
+    open_slots = count - len(closes)
+    if open_slots:
+        open_context = await _fetch_open_market_context()
+        if open_context is not None:
+            for _ in range(open_slots):
+                intention = _open_intention_from_context(*open_context)
+                if intention:
+                    batch_payload.append(intention)
+
+    if not batch_payload:
+        logging.info("Couldn't generate any intentions for batch.")
+        return None
+
+    if not await send_to_trade_action_service(batch_payload, wake_on_stop=wake_on_stop):
+        raise ApiError(502, _BATCH_SEND_FAILED, intentions=batch_payload)
+
+    record_generated(len(batch_payload))
+    return batch_payload
+
+
+async def generate_and_send_to_trade_action_service(payload=None, *, wake_on_stop: bool = False):
+    """Send one intention. Callers hold the generation lock.
+
+    The counter moves only after trade-action accepts the POST. A failed send
+    raises 502 and keeps the original `client_request_id` on the error.
+    """
     if payload is not None:
         if not isinstance(payload, dict) or not payload:
             raise ValueError("Payload must be a JSON object")
-        result = forward_supplied_trade_action(payload)
-        generator_state["total_generated"] += 1
+        result = await forward_supplied_trade_action(payload)
+        record_generated(1)
         logging.info(
-            f"[Trade Generation] Forwarded supplied intention {generator_state['total_generated']}."
+            "[Trade Generation] Forwarded supplied intention %s.",
+            payload.get("client_request_id"),
         )
         return result if result is not None else payload
 
-    intention = generate_random_intention()
-
-    if intention:
-        generator_state["total_generated"] += 1
-        send_to_trade_action_service(intention)
-        logging.info(
-            f"[Trade Generation] Generated intention {generator_state['total_generated']}."
-        )
-
-        return intention
-    else:
+    intention = await generate_random_intention()
+    if not intention:
         logging.info("No intention generated.")
         return None
+
+    if not await send_to_trade_action_service(intention, wake_on_stop=wake_on_stop):
+        raise ApiError(502, _SEND_FAILED, intention=intention)
+
+    record_generated(1)
+    logging.info(
+        "[Trade Generation] Generated intention %s.",
+        intention.get("client_request_id"),
+    )
+    return intention
 
 
 def generate_request_id():
@@ -137,80 +170,67 @@ def _enrich_open_payload(payload, asset_class, tick):
     return payload
 
 
-def generate_random_intention(open_context=_NO_SHARED_CONTEXT):
-    try:
-        action = generate_open_or_close_trade()
-        logging.info(f"Generated action: {action} == {ActionType.CLOSE_TRADE.value}")
+async def generate_random_intention():
+    action = generate_open_or_close_trade()
+    logging.info("Generated action: %s == %s", action, ActionType.CLOSE_TRADE.value)
 
-        if action == ActionType.CLOSE_TRADE.value:
-            # Provider mode only unwinds trades the ticket opened. Simulator
-            # mode still picks any active trade.
-            close_source = (
-                TradeSource.TRADING_TICKET.value
-                if generator_config.get("use_provider_data")
-                else None
-            )
-            close_payload = _close_intention_from_db(close_source)
-            if close_payload is not None:
-                return close_payload
-            logging.info(
-                "No active trades found. Defaulting to opening a new trade."
-            )
-            action = ActionType.OPEN_TRADE.value
+    if action == ActionType.CLOSE_TRADE.value:
+        # Provider mode only unwinds trades the ticket opened. Simulator
+        # mode still picks any active trade.
+        closes = await _select_closes(1, _close_source())
+        if closes:
+            return _close_payload(closes[0])
+        logging.info("No active trades found. Defaulting to opening a new trade.")
+        action = ActionType.OPEN_TRADE.value
 
-        if action == ActionType.OPEN_TRADE.value:
-            return _open_intention(open_context)
+    if action == ActionType.OPEN_TRADE.value:
+        return await _open_intention_from_http()
 
-        return None
-
-    except Exception as e:
-        logging.error(f"CRITICAL ERROR in intention generator: {e}", exc_info=True)
-        return None
+    return None
 
 
-def _open_intention(open_context):
-    """OPEN from a shared batch context, or fetch a fresh one for a single call."""
-    if open_context is _NO_SHARED_CONTEXT:
-        return _open_intention_from_http()
-    if open_context is None:
-        return None
-    return _open_intention_from_context(*open_context)
+async def _select_closes(limit, source):
+    """One short read of `limit` distinct active trades. The session is closed
+    before the caller builds payloads or calls trade-action.
+
+    `ORDER BY random()` scans the active set in Postgres and returns only
+    `limit` rows, so older trades stay eligible and Python never holds the book.
+    """
+    if limit < 1:
+        return []
+    logging.info("Checking for active trades to close (source=%s)...", source or "any")
+    statement = select(Trade.trade_id, Trade.trade_price, Trade.symbol).where(
+        Trade.status == TradeStatus.ACTIVE.value
+    )
+    if source:
+        statement = statement.where(Trade.source == source)
+    statement = statement.order_by(func.random()).limit(limit)
+    async with AsyncDBSessionManager() as db:
+        result = await db.session.execute(statement)
+        selected = [
+            (row.trade_id, row.trade_price, row.symbol) for row in result.all()
+        ]
+    if selected:
+        logging.info("Selected %s active trade(s) to close.", len(selected))
+    return selected
 
 
-# jak constrainy moze wplynac na transakcje DB -> duze tabele i sprawdzanie id w trakcie insertow
-# profiling
-
-def _close_intention_from_db(source=None):
-    """Read active trades in a short session, then return. No HTTP in here (TX-2)."""
-    with DBSessionManager() as db:
-        logging.info("Checking for active trades to close (source=%s)...", source or "any")
-        active_trades = db.trades.get_trades(
-            None, status=TradeStatus.ACTIVE.value, symbol=None, source=source
-        )
-        if not active_trades:
-            return None
-
-        trade_to_close = random.choice(active_trades)
-        logging.info(f"Found trade. Selected: {trade_to_close}")
-        logging.info(f"Found trade. Selected ID: {trade_to_close.trade_id}")
-
-        payload = {
-            "action_type": ActionType.CLOSE_TRADE.value,
-            "client_request_id": generate_request_id(),
-            "trade_id": str(trade_to_close.trade_id),
-            "close_price": round(
-                float(trade_to_close.trade_price) * random.uniform(0.98, 1.02),
-                4,
-            ),
-            "symbol": trade_to_close.symbol,
-            "close_reason": "RANDOM_TRADE_OUT",
-        }
-        logging.info(f"Success! Generated JSON for closing: {payload}")
-        return payload
+def _close_payload(row):
+    trade_id, trade_price, symbol = row
+    payload = {
+        "action_type": ActionType.CLOSE_TRADE.value,
+        "client_request_id": generate_request_id(),
+        "trade_id": str(trade_id),
+        "close_price": round(float(trade_price) * random.uniform(0.98, 1.02), 4),
+        "symbol": symbol,
+        "close_reason": "RANDOM_TRADE_OUT",
+    }
+    logging.info("Success! Generated JSON for closing: %s", payload)
+    return payload
 
 
-def _fetch_open_market_context():
-    """Fetch books, symbols, and snapshot in parallel. Returns a tuple or None."""
+async def _fetch_open_market_context():
+    """Fetch books, symbols, and snapshot together. Returns a tuple or None."""
     use_provider = bool(generator_config.get("use_provider_data"))
     symbols_url = _INTEGRATION_SYMBOLS_URL if use_provider else _SYMBOLS_URL
     snapshot_url = _INTEGRATION_SNAPSHOT_URL if use_provider else _SNAPSHOT_URL
@@ -221,15 +241,14 @@ def _fetch_open_market_context():
         "ASKING BOOKS-SERVICE for available books and %s for symbols...",
         source_name,
     )
-    books_future = _HTTP_POOL.submit(fetch_json_once, _BOOKS_URL)
-    symbols_future = _HTTP_POOL.submit(fetch_json_once, symbols_url)
-    snapshot_future = _HTTP_POOL.submit(fetch_json_once, snapshot_url)
     try:
-        books_response = books_future.result()
-        symbols_response = symbols_future.result()
-        snapshot = snapshot_future.result()
+        books_response, symbols_response, snapshot = await asyncio.gather(
+            fetch_json_once(_BOOKS_URL),
+            fetch_json_once(symbols_url),
+            fetch_json_once(snapshot_url),
+        )
     except Exception as e:
-        logging.error(f"Failed to fetch OPEN market context: {e}", exc_info=True)
+        logging.error("Failed to fetch OPEN market context: %s", e, exc_info=True)
         return None
 
     books_data = books_response.get("books", []) if books_response else []
@@ -244,8 +263,8 @@ def _fetch_open_market_context():
     return books_data, symbols_data, snapshot, use_provider
 
 
-def _open_intention_from_http():
-    context = _fetch_open_market_context()
+async def _open_intention_from_http():
+    context = await _fetch_open_market_context()
     if context is None:
         return None
     return _open_intention_from_context(*context)

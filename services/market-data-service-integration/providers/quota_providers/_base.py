@@ -1,5 +1,7 @@
+import asyncio
 from abc import ABC, abstractmethod
-from urllib.error import HTTPError
+
+from core.runtime import client
 
 
 class ProviderAPIError(Exception):
@@ -17,15 +19,22 @@ class BaseProvider(ABC):
 
     def __init__(self, api_key: str):
         self.api_key = api_key
+        self.semaphore = asyncio.Semaphore(self.semaphore_limit)
 
     @abstractmethod
     def normalize_data(self, data, symbol) -> dict:
         pass
 
     @abstractmethod
-    def fetch_data(self, symbol: str):
+    async def fetch_data(self, symbol: str):
         pass
 
     @abstractmethod
     def health(self) -> ProviderAPIError | None:
         pass
+
+    # Async: awaits AsyncClient.get.
+    async def get_json(self, url: str, headers: dict | None = None):
+        response = await client().get(url, headers=headers)
+        response.raise_for_status()
+        return response.json()
