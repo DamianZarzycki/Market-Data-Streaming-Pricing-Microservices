@@ -60,3 +60,7 @@ The stream does not fan out a frame that is already on a queue. `iter_quote_even
 Errors are built as Bottle `HTTPResponse` in `core/helpers.py`, so the framework sits outside the handler. `GET /providers/<provider>/health` is a live probe inside the request.
 
 Symbol lists and snapshots are as simple as monitoring. The stream and the refresh routes are what put this service last.
+
+## 9. Shared DB manager implementation
+
+Handling I/O asynchronously requires async-compatible libraries, which means the shared DB layer has to be rewritten to support them. Otherwise we will block the event-loop.

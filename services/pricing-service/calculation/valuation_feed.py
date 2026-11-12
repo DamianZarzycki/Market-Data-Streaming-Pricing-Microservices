@@ -5,10 +5,8 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from fastapi import status
-
 from shared.trading_shared.env import env_int
-from shared.trading_shared.http_errors import ApiError
+
 from calculation.valuation_state import valuation_state
 
 SSE_QUEUE_MAX = env_int("PRICING_SSE_QUEUE_MAX", 256)
@@ -129,6 +127,11 @@ class ValuationFeed:
         return valuation_state.marks_copy()
 
     def valuation_for(self, trade_id):
+        """Look up one mark. The HTTP types stay inside this method so pricing does not import a framework."""
+        from fastapi import status
+
+        from shared.trading_shared.http_errors import ApiError
+
         valuation = valuation_state.mark_for(trade_id)
         if valuation is None:
             raise ApiError(

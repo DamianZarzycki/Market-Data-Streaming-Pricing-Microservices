@@ -3,12 +3,12 @@
 Usage (from the db-seed container): python seed_provider_limits.py
 """
 import logging
-import os
 import sys
 from datetime import datetime, timezone
 
 from sqlalchemy.dialects.postgresql import insert
 
+from shared.trading_shared.env import env_optional
 from shared.trading_shared.models import MarketDataProviderLimits
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -45,7 +45,7 @@ DEFAULT_LIMITS = (
 
 
 def seed() -> None:
-    if not os.getenv("DATABASE_URL"):
+    if env_optional("DATABASE_URL") is None:
         logging.error("DATABASE_URL is not set")
         sys.exit(1)
 

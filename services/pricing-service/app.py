@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -86,4 +87,9 @@ register_routes(app)
 
 if __name__ == "__main__":
     logging.info("Starting Pricing Service...")
-    uvicorn.run("app:app", host="0.0.0.0", port=8002, workers=1)
+    uvicorn.run(
+        "app:app",
+        host="0.0.0.0",
+        port=int(os.environ.get("PRICING_PORT", "8002")),
+        workers=1,
+    )

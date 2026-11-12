@@ -2,7 +2,6 @@ from fastapi import FastAPI
 from shared.trading_shared.audit import AuditLogger
 from shared.trading_shared.db import dispose_async_engine
 from shared.trading_shared.enums import EventType
-from shared.trading_shared.env import env_int
 from shared.trading_shared.logging_config import configure_logging
 from contextlib import asynccontextmanager
 from api.errors import install_error_handlers
@@ -10,45 +9,40 @@ from routes import register_routes
 
 import asyncio
 import logging
-import threading
 import trades_service
 import worker
 import uvicorn
 
 
-
 configure_logging("blotter-service")
 
-_JOIN_TIMEOUT_SECONDS = env_int("BLOTTER_JOIN_TIMEOUT_SECONDS", 5)
 
-
+# Async: awaits audit inserts, worker cancellation, AsyncClient.aclose, and engine dispose.
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     audit_logger = AuditLogger("blotter-service")
     await audit_logger.ainfo(
         EventType.WORKER_STARTED,
-        "Valuation worker thread started",
+        "Valuation worker started",
         entity_type="Service",
         correlation_id="",
     )
     trades_service.open_http()
-    worker.stop_event.clear()
-    thread = threading.Thread(
-        target=worker.valuation_worker,
-        name="valuation-worker",
-        daemon=False,
-    )
-    thread.start()
+    worker.open_http()
+    task = asyncio.create_task(worker.valuation_worker(), name="valuation-worker")
     try:
         yield
     finally:
-        worker.stop_event.set()
-        worker.close_stream()
-        await asyncio.to_thread(thread.join, _JOIN_TIMEOUT_SECONDS)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        await worker.close_http()
         await trades_service.close_http()
         await audit_logger.ainfo(
             EventType.WORKER_STOPPED,
-            "Valuation worker thread stopped",
+            "Valuation worker stopped",
             entity_type="Service",
             correlation_id="",
         )

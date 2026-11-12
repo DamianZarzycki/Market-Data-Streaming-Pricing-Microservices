@@ -162,3 +162,20 @@ Computation vetoes nothing. With one client both variants spin the hash at the s
 One lesson from the measurement, which is not a GO thesis but a condition so that GO does not get killed on the way: if work that does not give the loop back goes into `async def` (a hash with no pause, `urlopen`, a synchronous `commit`, `time.sleep`), the whole process stops. We forced that: 50 clients on `/cpu-async`, and the "are you alive" check fails in five of six runs. A wait that cannot pause stays in an ordinary function. FastAPI then sets that work aside, and the cards keep hanging.
 
 **Sources of uncertainty.** This is a laptop running Docker, not a production machine; the order of magnitude is for deciding the model, not for capacity. The spread between repetitions is on the charts and in the tables — where the whiskers are large (S2 at 200 and 700 clients), the result is unstable and does not carry a decision. The SSE frame carries nothing, so the test speaks about holding a connection, not about a fan of valuations. Keep-alive on the oha side may have helped both sides a little. The target of 1,400–3,600 streams is the sum of cards on the desk; on one service we measured 1,200, and at that count the question "are 200 threads enough" is already closed.
+
+
+## 6. Criteria and the decision
+
+The decision is GO. The benchmark shows that FastAPI handles a large number of concurrent SSE connections more reliably, and over the same interval writes about twice as much data to the database at a comparable error rate. In the remaining scenarios the differences are small. The services depend on repeated writes and on SSE, so those two results were enough to settle the choice.
+
+## 7. Risk analysis
+
+[risk_matrix.md]
+
+## 8. Refactor
+
+The decision is GO. The scope is all eight services, each rewritten to FastAPI. The estimated cost was higher than the actual cost under consideration. Several factors likely contributed to that difference. Each completed service made the next one easier to assess: what a correct refactor requires, which details matter, and where review should be concentrated.
+
+## 9. Conclusions
+
+At the planning stage I would give more weight to the expected load of the system, and decide then whether asynchronous I/O is required. The cost of maintaining the code has increased. It is still possible to follow asynchronous practice from start to finish and then block a thread with an ordinary queue. The same attention now applies to simple endpoints, not only to those that query the database. A new endpoint should be matched to its requirements, and where those requirements justify it, placed in a separate service. The architecture of the code is at a higher standard than before.

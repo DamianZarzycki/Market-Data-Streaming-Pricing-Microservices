@@ -1,7 +1,8 @@
+import asyncio
 import json
 import logging
-import threading
-from urllib import request
+
+import httpx2
 
 from cache.valuation_cache_service import ValuationCacheService
 from shared.trading_shared.audit import AuditLogger
@@ -15,99 +16,88 @@ STREAM_TIMEOUT_SECONDS = env_float("BLOTTER_STREAM_TIMEOUT_SECONDS", 30.0, minim
 
 cache_service = ValuationCacheService()
 audit_logger = AuditLogger("blotter-service")
-stop_event = threading.Event()
-_response_lock = threading.Lock()
-_open_response = None
+http_client: httpx2.AsyncClient | None = None
 
 
-def sleep(delay: float) -> None:
-    """Wait out the reconnect backoff. Returns early when shutdown is requested."""
-    stop_event.wait(delay)
+def open_http() -> None:
+    """Build the stream client. The first request is the await, not this call."""
+    global http_client
+    http_client = httpx2.AsyncClient(
+        timeout=httpx2.Timeout(STREAM_TIMEOUT_SECONDS, read=STREAM_TIMEOUT_SECONDS)
+    )
 
 
-def hold_stream(response) -> None:
-    global _open_response
-    with _response_lock:
-        _open_response = response
+# Async: awaits AsyncClient.aclose.
+async def close_http() -> None:
+    global http_client
+    client = http_client
+    http_client = None
+    if client is not None:
+        await client.aclose()
 
 
-def close_stream() -> None:
-    """Close the response the worker is blocked on so shutdown does not wait for the read timeout."""
-    global _open_response
-    with _response_lock:
-        response = _open_response
-        _open_response = None
-    if response is None:
-        return
-    close = getattr(response, "close", None)
-    if close is None:
-        return
+def parse_valuation_line(line: str):
+    decoded = line.strip()
+    if not decoded.startswith("data:"):
+        return None
+    data_str = decoded[len("data:"):].strip()
     try:
-        close()
-    except Exception:
-        logging.exception("Failed to close valuation stream")
+        valuation_data = json.loads(data_str)
+    except json.JSONDecodeError as exc:
+        logging.error("Failed to parse valuation data: %s", exc)
+        return None
+    if not isinstance(valuation_data, dict):
+        return None
+    if not valuation_data.get("trade_id"):
+        return None
+    return valuation_data
 
 
-def valuation_worker():
+# Async generator: awaits AsyncClient.stream and aiter_lines on the valuation SSE body.
+async def iter_valuations():
+    if http_client is None:
+        raise RuntimeError("HTTP client is not open")
+    logging.info("Attempting to connect to the stream...")
+    async with http_client.stream("GET", STREAM_URL) as response:
+        response.raise_for_status()
+        logging.info("Connected to the stream successfully.")
+        await audit_logger.ainfo(
+            EventType.STREAM_CONNECTED,
+            "Connected to pricing-service valuation stream",
+        )
+        logging.info("Connected to valuation stream, starting to read events...")
+        async for line in response.aiter_lines():
+            valuation_data = parse_valuation_line(line)
+            if valuation_data is None:
+                continue
+            yield valuation_data
+
+
+# Async task: awaits the valuation SSE body and asyncio.sleep between reconnects.
+async def valuation_worker():
     logging.info("Valuation worker started.")
     reconnect_delay = BASE_RECONNECT_DELAY
-    while not stop_event.is_set():
+    while True:
         try:
-            stream_response = connect_to_valuation_stream()
-            hold_stream(stream_response)
-            logging.info("Connected to valuation stream, starting to read events...")
+            async for valuation_data in iter_valuations():
+                reconnect_delay = BASE_RECONNECT_DELAY
+                cache_service.update_cache(valuation_data["trade_id"], valuation_data)
+                logging.info(
+                    "Updated valuation cache for trade %s",
+                    valuation_data["trade_id"],
+                )
             reconnect_delay = BASE_RECONNECT_DELAY
-
-            for raw_line in stream_response:
-                if stop_event.is_set():
-                    break
-                line = raw_line.decode("utf-8").strip()
-                if not line.startswith("data:"):
-                    continue
-                data_str = line[len("data:"):].strip()
-                try:
-                    valuation_data = json.loads(data_str)
-                except json.JSONDecodeError as exc:
-                    logging.error("Failed to parse valuation data: %s", exc)
-                    continue
-                if not isinstance(valuation_data, dict):
-                    continue
-                trade_id = valuation_data.get("trade_id")
-                if not trade_id:
-                    continue
-                cache_service.update_cache(trade_id, valuation_data)
-                logging.info("Updated valuation cache for trade %s", trade_id)
-
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
-            if stop_event.is_set():
-                break
             logging.error(
                 "Connection lost: %s. Reconnecting in %ss...",
                 exc,
                 reconnect_delay,
             )
-            audit_logger.error(
+            await audit_logger.aerror(
                 EventType.STREAM_DISCONNECTED,
                 "Lost connection to valuation stream: %s" % exc,
             )
-            sleep(reconnect_delay)
+            await asyncio.sleep(reconnect_delay)
             reconnect_delay = min(reconnect_delay * 2, MAX_RECONNECT_DELAY)
-        finally:
-            close_stream()
-
-
-def connect_to_valuation_stream():
-    try:
-        response = request.urlopen(STREAM_URL, timeout=STREAM_TIMEOUT_SECONDS)
-    except Exception as exc:
-        audit_logger.error(
-            EventType.STREAM_DISCONNECTED,
-            "Failed to connect to valuation stream: %s" % exc,
-        )
-        raise
-    logging.info("Connected to the stream successfully.")
-    audit_logger.info(
-        EventType.STREAM_CONNECTED,
-        "Connected to pricing-service valuation stream",
-    )
-    return response

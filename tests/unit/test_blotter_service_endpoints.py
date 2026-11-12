@@ -19,14 +19,18 @@ def _client():
     trades = sys.modules["trades_service"]
     cache = sys.modules["cache.valuation_cache_service"]
     cache.valuation_cache.clear()
-    worker_mod.stop_event.clear()
     started = threading.Event()
+    finished = threading.Event()
 
-    def _wait():
+    async def _idle():
         started.set()
-        worker_mod.stop_event.wait()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            finished.set()
 
-    worker_mod.valuation_worker = _wait
+    worker_mod.valuation_worker = _idle
+    worker_mod._idle_finished = finished
 
     def _session():
         db = AsyncMock()
@@ -270,11 +274,10 @@ def test_trade_audit_logs_is_an_empty_200():
     assert response.content == b""
 
 
-def test_lifespan_starts_the_worker_and_closes_the_stream():
+def test_lifespan_starts_the_worker_and_stops_it():
     with _client() as (client, _, _, worker_mod):
         response = client.get("/health")
-        stream = MagicMock()
-        worker_mod.hold_stream(stream)
+        finished = worker_mod._idle_finished
 
     assert response.status_code == 200
-    stream.close.assert_called_once()
+    assert finished.wait(2)
